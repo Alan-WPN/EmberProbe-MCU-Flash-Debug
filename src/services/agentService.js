@@ -28,6 +28,8 @@ class AgentService {
     constructor(options) {
         this.Bridge = options.Bridge;
         this.workspaceProvider = options.workspaceProvider;
+        this.storageDirProvider = options.storageDirProvider || null;
+        this.onCall = options.onCall || null;
         this.handlers = { ...options.handlers };
         this.bridge = null;
     }
@@ -46,6 +48,7 @@ class AgentService {
                 code: "METHOD_NOT_FOUND"
             });
         }
+        if (this.onCall) await this.onCall(method, params);
         const result = await handler(params);
         return method === "chip.read" ? this.selectChipFields(result, params) : result;
     }
@@ -65,7 +68,11 @@ class AgentService {
     async start() {
         const workspace = this.workspaceProvider();
         if (!workspace || this.bridge) return null;
-        this.bridge = new this.Bridge(workspace, (method, params) => this.call(method, params));
+        this.bridge = new this.Bridge(
+            workspace,
+            (method, params) => this.call(method, params),
+            this.storageDirProvider?.()
+        );
         return await this.bridge.start();
     }
 

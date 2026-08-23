@@ -20,7 +20,7 @@ const openocdScripts = require("./openocdScripts");
 const { AgentBridge } = require("./agentBridge");
 const { WriteAuthorization } = require("./writeAuthorization");
 const { ProbeCoordinator } = require("./probeCoordinator");
-const { ConfigurationStore } = require("./services/configurationStore");
+const { ConfigurationStore, assertAgentSettable } = require("./services/configurationStore");
 const { FlashService } = require("./services/flashService");
 const { FaultService } = require("./services/faultService");
 const { AgentService } = require("./services/agentService");
@@ -141,6 +141,8 @@ class MainViewProvider {
         this._agentSamplingStatus = null;
         this._uiWritePromise = Promise.resolve();
         this._writeAuthorization = new WriteAuthorization(context.workspaceState);
+        this._lastSkillStatus = null;
+        this._bridgeSkillWarned = false;
         this._configurationStore = new ConfigurationStore({
             vscode,
             context,
@@ -159,6 +161,9 @@ class MainViewProvider {
         this._agentService = new AgentService({
             Bridge: AgentBridge,
             workspaceProvider: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+            // Bridge 描述文件（含 token）写入 globalStorage，工作区只留指针，避免令牌随 git/云同步泄露
+            storageDirProvider: () => this._context.globalStorageUri.fsPath,
+            onCall: () => this._warnIfSkillsModified(),
             handlers: {
                 'config.get': () => this._configurationSnapshot(),
                 'config.set': params => this._setAgentConfiguration(params.values || {}),
@@ -483,6 +488,8 @@ class MainViewProvider {
         return this._configurationStore.workspacePath(value, extension);
     }
     async _setAgentConfiguration(values) {
+        // openocdPath 可把探针调用引向任意可执行文件，禁止经 Agent Bridge 修改；由用户在设置或侧边栏更改
+        assertAgentSettable(values);
         return this._configurationStore.update(values);
     }
     async _addAgentWatch(params) {
@@ -676,6 +683,16 @@ class MainViewProvider {
     }
     // 获取 Agent 探针会话：复用活动采样连接或创建临时会话，handler({session, source, temporary}) 完成实际读写，
     // finally 中临时会话必释放。互斥与状态同步语义与原 _runAgentSamples 一致。
+    // Tcl 端口：用户显式配置过 emberprobe.tclPort 时使用配置值，否则随机选用临时端口。
+    // OpenOCD 的 Tcl 端口无认证，固定默认端口会让采样期间的任意本机进程都能下发 halt/write_memory。
+    async _resolveTclPort(cfg) {
+        const inspect = typeof cfg.inspect === 'function' ? cfg.inspect('tclPort') : null;
+        if (inspect && (inspect.workspaceValue !== undefined || inspect.globalValue !== undefined)) {
+            return validation.clampInteger(cfg.get('tclPort', 6666), 6666, 1, 65535);
+        }
+        const port = await liveWatch.findFreePort();
+        return port || 6666;
+    }
     async _withAgentProbe(handler, options = {}) {
         const syncStatus = !!options.syncStatus;
         const total = options.total || 0;
@@ -713,7 +730,7 @@ class MainViewProvider {
                     probe: debuggerCfg,
                     target: mcuCore,
                     cwd,
-                    port: validation.clampInteger(cfg.get('tclPort', 6666), 6666, 1, 65535),
+                    port: await this._resolveTclPort(cfg),
                     intervalMs: 10000
                 }, {});
                 this._agentReadSession = session;
@@ -959,9 +976,21 @@ class MainViewProvider {
     }
     async refreshSkillStatus() {
         const status = await skillInstaller.inspectSkills(vscode, this._context);
+        this._lastSkillStatus = status;
         this._postSkillStatus(status);
         this._promptSkillUpgrade(status);
         return status;
+    }
+    // Agent Bridge 收到请求时若发现已安装技能被本地篡改，提示一次：技能脚本以当前用户身份执行，
+    // 被篡改的脚本等于借 Agent 之名运行任意代码（不阻断，用户可能是有意自定义）
+    _warnIfSkillsModified() {
+        if (this._bridgeSkillWarned || this._lastSkillStatus?.state !== 'modified') return;
+        this._bridgeSkillWarned = true;
+        const manage = this._t('msg.skillsManage');
+        vscode.window.showWarningMessage(this._t('msg.skillsModifiedBridgeWarn'), manage)
+            .then(choice => {
+                if (choice === manage) vscode.commands.executeCommand('mcu-vscode.manageAgentSkills');
+            });
     }
     // 已安装 Skills 与插件内置版本存在差异（可更新/被修改/不完整）时提示升级；
     // 每个会话最多提示一次，避免侧边栏刷新与工作区切换反复打扰
@@ -1306,7 +1335,7 @@ class MainViewProvider {
         const { cwd } = this._commandContext();
         const session = new liveWatch.LiveWatchSession(vscode, {
             executable, probe: debuggerCfg, target: mcuCore, cwd,
-            port: validation.clampInteger(cfg.get('tclPort', 6666), 6666, 1, 65535),
+            port: await this._resolveTclPort(cfg),
             intervalMs: validation.clampInteger(intervalMs || cfg.get('sampleIntervalMs', 100), 100, 20, 10000)
         }, {
             onSample: (samples, t) => {

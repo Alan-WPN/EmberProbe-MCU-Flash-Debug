@@ -6,6 +6,17 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+### Security
+
+- Agent Bridge 描述文件（含访问令牌）改存扩展全局存储目录，工作区只保留不含令牌的指针文件，避免令牌随 git 提交或云盘同步泄露；Bridge 停止时一并清理描述文件与指针。已安装的旧版技能脚本仍可读取旧格式描述文件，升级本版本后请在侧边栏重新安装 Agent Skills。
+- Agent Bridge 的 `config.set` 拒绝修改 `openocdPath`（返回 `CONFIG_KEY_FORBIDDEN`）：该键可把后续探针调用指向任意可执行文件；如需更改请在 VS Code 设置或 EmberProbe 侧边栏中由用户完成。
+- 用户未显式配置 `emberprobe.tclPort` 时，实时采样与 Agent 临时读取自动选用随机临时端口；OpenOCD 的 Tcl 端口无认证，固定默认端口会让采样期间的任意本机进程都能下发 halt/write_memory。显式配置后仍使用配置端口。
+- 变量写入的 workspace 信任增加 24 小时有效期，到期后需重新走两阶段确认；旧版本存储的永久信任在升级后视为已过期。
+- Agent Bridge 收到请求时若检测到已安装的 Agent Skills 被本地篡改，会弹出警告并引导重新安装（每会话一次，不阻断）。
+- Webview 内嵌的 i18n JSON 序列化时转义 `<`，防止文案中出现 `</script>` 提前闭合脚本标签。
+- OpenOCD 预置包解压新增显式路径断言，拒绝解析后落在暂存目录之外的条目（Zip Slip 纵深防御）。
+- 重新生成 Webview 资产时清理同 scope 下不再引用的旧哈希资产，避免 `globalStorage/webview-assets` 无限膨胀。
+
 ## [0.6.1] - 2026-08-22
 
 ### Added

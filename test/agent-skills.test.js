@@ -6,7 +6,7 @@ const path = require("path");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
 const { AgentBridge } = require("../src/agentBridge");
-const { call, diagnosticForError } = require("../skills/_emberprobe/agent-client");
+const { call, descriptor: descriptorOf, diagnosticForError } = require("../skills/_emberprobe/agent-client");
 const configSkill = require("../skills/mcu-config/scripts/config");
 const liveSkill = require("../skills/mcu-live-watch/scripts/read-live");
 const { LiveWatchSession } = require("../src/liveWatch");
@@ -65,10 +65,19 @@ const execFileAsync = promisify(execFile);
     assert.deepStrictEqual(once[0].bytes, [0x2a, 0, 0, 0]);
     assert.deepStrictEqual(session.watch, [], "one-shot reads must not modify the UI watch list");
 
+    const freePort = await require("../src/liveWatch").findFreePort();
+    assert.ok(Number.isInteger(freePort) && freePort > 0 && freePort < 65536, "findFreePort must return a valid port");
+
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-bridge-"));
+    const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-bridge-storage-"));
     // 捕获 chip.read 实际收到的参数，验证 --fields 单独使用时不会回落到 identity 组
     const chipReadParams = [];
     const bridge = new AgentBridge(root, async (method, params) => {
+        if (method === "config.set") {
+            // 与扩展端 _setAgentConfiguration 相同的守卫：openocdPath 不允许经 Agent Bridge 修改
+            require("../src/services/configurationStore").assertAgentSettable(params.values || {});
+            return { updated: true };
+        }
         if (method === "chip.read") {
             chipReadParams.push(params);
             return { core: "M4", chip: "STM32F407", deviceId: "0x463", flashSize: "1024 KB" };
@@ -122,10 +131,16 @@ const execFileAsync = promisify(execFile);
                 { timestamp: 3000, values: { Tick: { requestedName: "tick", value: 3, type: "u32", address: "0x20000000" } } }
             ]
         };
-    });
+    }, storageDir);
     try {
         const descriptor = await bridge.start();
         assert.ok(descriptor.port > 0);
+        // 描述文件（含 token）必须落在用户目录而非工作区；工作区只留指针
+        assert.deepStrictEqual(descriptor, JSON.parse(fs.readFileSync(bridge.descriptorPath, "utf8")));
+        assert.ok(bridge.descriptorPath.startsWith(storageDir), "descriptor must live in the storage dir");
+        const pointer = JSON.parse(fs.readFileSync(path.join(root, ".emberprobe", "agent-bridge.json"), "utf8"));
+        assert.strictEqual(pointer.descriptorPath, bridge.descriptorPath);
+        assert.ok(!pointer.token, "workspace pointer must never contain the bridge token");
         const result = await call(root, "config.get", { test: true });
         assert.deepStrictEqual(result, { method: "config.get", params: { test: true } });
         const fastPath = await execFileAsync(process.execPath, [
@@ -181,6 +196,20 @@ const execFileAsync = promisify(execFile);
         assert.strictEqual(failedTrend.error.details.openocdTail[0], "Error: cannot read IDR");
         assert.ok(fs.existsSync(path.join(root, ".emberprobe", "agent-bridge.json")));
 
+        // Bridge 侧 config.set 拒绝修改 openocdPath：该键可把探针调用引向任意可执行文件
+        let forbidden;
+        try {
+            await call(root, "config.set", { values: { openocdPath: "/tmp/evil" } });
+        } catch (error) {
+            forbidden = error;
+        }
+        assert.ok(forbidden, "config.set with openocdPath must fail");
+        assert.strictEqual(forbidden.code, "CONFIG_KEY_FORBIDDEN");
+        const forbiddenDiagnostic = diagnosticForError(forbidden);
+        assert.strictEqual(forbiddenDiagnostic.error.code, "CONFIG_KEY_FORBIDDEN");
+        assert.strictEqual(forbiddenDiagnostic.error.retryable, false);
+        assert.ok(forbiddenDiagnostic.error.suggestedActions.length > 0);
+
         // —— mcu-var-write：先返回聊天确认，再凭一次性 ID 写入并记住工作区授权 ——
         const writeRequest = await execFileAsync(process.execPath, [
             path.resolve(__dirname, "../skills/mcu-var-write/scripts/write-var.js"),
@@ -227,9 +256,28 @@ const execFileAsync = promisify(execFile);
         const elfPayload = JSON.parse(elfOut.stdout);
         assert.strictEqual(elfPayload.flash.total, 0x110);
         assert.strictEqual(elfPayload.requestedTop, 5);
+
+        // 停止 Bridge 后描述文件与工作区指针一并清理
+        await bridge.stop();
+        assert.ok(!fs.existsSync(bridge.descriptorPath), "descriptor must be removed on stop");
+        assert.ok(!fs.existsSync(path.join(root, ".emberprobe", "agent-bridge.json")), "pointer must be removed on stop");
+
+        // 旧格式兼容：工作区描述文件直接含 token（旧版扩展写入）时，agent-client 仍可原地读取
+        const legacyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-bridge-legacy-"));
+        try {
+            const legacyFile = path.join(legacyRoot, ".emberprobe", "agent-bridge.json");
+            fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+            fs.writeFileSync(legacyFile, JSON.stringify({ host: "127.0.0.1", port: 61234, token: "legacy-token" }));
+            const legacy = descriptorOf(legacyRoot);
+            assert.strictEqual(legacy.port, 61234);
+            assert.strictEqual(legacy.token, "legacy-token");
+        } finally {
+            fs.rmSync(legacyRoot, { recursive: true, force: true });
+        }
     } finally {
         await bridge.stop();
         fs.rmSync(root, { recursive: true, force: true });
+        fs.rmSync(storageDir, { recursive: true, force: true });
     }
 
     console.log("Agent Skills tests passed");

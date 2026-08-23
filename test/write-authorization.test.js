@@ -56,8 +56,24 @@ function makePlan(overrides = {}) {
     const remembered = auth.authorize(plan, { confirmationId: rememberedId, remember: true });
     assert.deepStrictEqual(remembered, { authorized: true, mode: "workspace", remember: true });
     await auth.trustWorkspace();
-    assert.deepStrictEqual(auth.status(), { trusted: true, scope: "workspace" });
+    const trustedStatus = auth.status();
+    assert.strictEqual(trustedStatus.trusted, true);
+    assert.strictEqual(trustedStatus.scope, "workspace");
+    assert.ok(trustedStatus.trustedExpiresAt, "trusted status must expose the expiry timestamp");
     assert.deepStrictEqual(auth.authorize(makePlan({ bytes: [1, 2, 3, 4] })), { authorized: true, mode: "workspace", remember: false });
+
+    // workspace 信任 24 小时后过期，需重新走两阶段确认
+    now += 24 * 60 * 60 * 1000 + 1;
+    assert.strictEqual(auth.isTrusted(), false);
+    assert.strictEqual(auth.authorize(plan).authorized, false);
+
+    // 旧版本存储的布尔 true 一律视为未信任，升级后强制重新确认
+    await auth.trustWorkspace();
+    now -= 24 * 60 * 60 * 1000;
+    await storage.update("agent.writeTrusted", true);
+    assert.strictEqual(auth.isTrusted(), false);
+    assert.strictEqual(auth.authorize(plan).authorized, false);
+
     await auth.reset();
     assert.deepStrictEqual(auth.status(), { trusted: false, scope: "workspace" });
     assert.strictEqual(auth.authorize(plan).authorized, false);

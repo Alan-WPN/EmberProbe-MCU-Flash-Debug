@@ -6,10 +6,29 @@ const path = require("path");
 const installer = require("../src/openocdInstaller");
 const { discoverTargetConfigs } = require("../src/openocdScripts");
 const { probeOpenOcd } = require("../src/openocdChecker");
-const { platformKey, getBundledArchive, installDir, locateOpenOcdBinary, installBundledOpenOcd, OPENOCD_BIN } = installer;
+const { platformKey, getBundledArchive, installDir, locateOpenOcdBinary, installBundledOpenOcd, assertSafeEntryPath, OPENOCD_BIN } = installer;
 
 // 用 async IIFE 包裹，避免与 require 一起触发模块格式歧义
 (async () => {
+    // 解包路径断言（Zip Slip 纵深防御）：越出 staging 的条目必须拒绝
+    const staging = fs.mkdtempSync(path.join(os.tmpdir(), "ep-slip-"));
+    try {
+        assert.doesNotThrow(() => assertSafeEntryPath(staging, "bin/openocd.exe"));
+        assert.doesNotThrow(() => assertSafeEntryPath(staging, "xpack-openocd-1.0/scripts/inner.cfg"));
+        for (const evil of ["../evil.txt", "/etc/passwd", "a/../../evil"]) {
+            assert.throws(
+                () => assertSafeEntryPath(staging, evil),
+                (error) => error.code === "UNSAFE_ARCHIVE_ENTRY",
+                `entry path must be rejected: ${evil}`
+            );
+        }
+        if (process.platform === "win32") {
+            assert.throws(() => assertSafeEntryPath(staging, "C:\\evil\\openocd.exe"), (error) => error.code === "UNSAFE_ARCHIVE_ENTRY");
+        }
+    } finally {
+        fs.rmSync(staging, { recursive: true, force: true });
+    }
+
     // 平台映射：当前进程平台应能映射到已知键或返回 null
     const key = platformKey();
     assert.ok(typeof key === "string" || key === null, "platformKey 必须返回 string 或 null");

@@ -3,6 +3,9 @@ const crypto = require("crypto");
 
 const DEFAULT_STORAGE_KEY = "agent.writeTrusted";
 const DEFAULT_TTL_MS = 5 * 60 * 1000;
+// workspace 信任有效期：持久放行会让任何持有 Bridge token 的进程在用户无感知的情况下静默写 RAM，
+// 限制为 24 小时，到期后必须重新走两阶段确认
+const DEFAULT_TRUST_TTL_MS = 24 * 60 * 60 * 1000;
 
 function writePlanIdentity(plan) {
     const elf = plan?.elfResult?.elf || {};
@@ -30,17 +33,23 @@ class WriteAuthorization {
         this.storage = storage;
         this.storageKey = options.storageKey || DEFAULT_STORAGE_KEY;
         this.ttlMs = options.ttlMs || DEFAULT_TTL_MS;
+        this.trustTtlMs = options.trustTtlMs || DEFAULT_TRUST_TTL_MS;
         this.now = options.now || (() => Date.now());
         this.createId = options.createId || (() => crypto.randomBytes(16).toString("hex"));
         this.pending = new Map();
     }
 
     isTrusted() {
-        return this.storage.get(this.storageKey, false) === true;
+        const trustedAt = this.storage.get(this.storageKey, false);
+        // 旧版本曾直接存布尔 true；统一视为已过期，升级后强制重新确认一次
+        return typeof trustedAt === "number" && this.now() - trustedAt < this.trustTtlMs;
     }
 
     status() {
-        return { trusted: this.isTrusted(), scope: "workspace" };
+        const trusted = this.isTrusted();
+        return trusted
+            ? { trusted: true, scope: "workspace", trustedExpiresAt: new Date(this.storage.get(this.storageKey) + this.trustTtlMs).toISOString() }
+            : { trusted: false, scope: "workspace" };
     }
 
     _prune() {
@@ -107,7 +116,7 @@ class WriteAuthorization {
     }
 
     async trustWorkspace() {
-        await this.storage.update(this.storageKey, true);
+        await this.storage.update(this.storageKey, this.now());
         return this.status();
     }
 
@@ -118,4 +127,4 @@ class WriteAuthorization {
     }
 }
 
-module.exports = { WriteAuthorization, writePlanIdentity, fingerprintWritePlan, DEFAULT_STORAGE_KEY, DEFAULT_TTL_MS };
+module.exports = { WriteAuthorization, writePlanIdentity, fingerprintWritePlan, DEFAULT_STORAGE_KEY, DEFAULT_TTL_MS, DEFAULT_TRUST_TTL_MS };

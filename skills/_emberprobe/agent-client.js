@@ -4,12 +4,22 @@ const path = require("path");
 const http = require("http");
 
 function descriptor(workspace) {
-    const file = path.join(path.resolve(workspace || process.cwd()), ".emberprobe", "agent-bridge.json");
-    let value;
-    try { value = JSON.parse(fs.readFileSync(file, "utf8")); }
+    const pointerFile = path.join(path.resolve(workspace || process.cwd()), ".emberprobe", "agent-bridge.json");
+    let pointer;
+    try { pointer = JSON.parse(fs.readFileSync(pointerFile, "utf8")); }
     catch {
         throw Object.assign(new Error("EmberProbe Agent Bridge descriptor is unavailable."), {
             code: "BRIDGE_UNAVAILABLE",
+            details: { descriptor: pointerFile }
+        });
+    }
+    // 新格式：工作区文件为指针（不含 token），真实描述文件位于用户目录；旧格式直接存 token 则原地读取
+    const file = typeof pointer.descriptorPath === "string" && pointer.descriptorPath ? pointer.descriptorPath : pointerFile;
+    let value;
+    try { value = JSON.parse(fs.readFileSync(file, "utf8")); }
+    catch {
+        throw Object.assign(new Error("Invalid EmberProbe Agent Bridge descriptor"), {
+            code: "BRIDGE_DESCRIPTOR_INVALID",
             details: { descriptor: file }
         });
     }
@@ -24,7 +34,7 @@ function descriptor(workspace) {
 
 const DIAGNOSTICS = {
     BRIDGE_UNAVAILABLE: ['extension', 'EmberProbe 扩展未激活，或工作区中的 Agent Bridge 描述文件不存在。', ['确认已安装并启用 EmberProbe 扩展。', '在 VS Code 中重新加载当前工作区后重试。'], true],
-    BRIDGE_DESCRIPTOR_INVALID: ['extension', 'Agent Bridge 描述文件无效或来自不兼容版本。', ['重新加载 VS Code 窗口，让 EmberProbe 重建 Bridge。'], true],
+    BRIDGE_DESCRIPTOR_INVALID: ['extension', 'Agent Bridge 描述文件无效或来自不兼容版本。', ['重新加载 VS Code 窗口，让 EmberProbe 重建 Bridge。', '若刚升级过 EmberProbe，请在侧边栏重新安装 Agent Skills（旧版脚本无法解析新的描述文件位置）。'], true],
     BRIDGE_TIMEOUT: ['extension', 'Agent Bridge 请求超时。', ['检查侧边栏是否仍显示采样中。', '若采样仍在进行，可等待完成；否则停止后重试。'], true],
     CONFIG_INCOMPLETE: ['configuration', 'EmberProbe 尚未配置调试器或 MCU 目标。', ['使用 mcu-config Skill 读取并补全 debugger 与 mcu 配置。'], false],
     OPENOCD_NOT_READY: ['environment', 'OpenOCD 未安装、路径无效或尚未通过 EmberProbe 检测。', ['在 EmberProbe 侧边栏安装 OpenOCD，或修正 openocdPath。'], false],
@@ -52,6 +62,7 @@ const DIAGNOSTICS = {
     UNSUPPORTED_VARIABLE: ['variable_resolution', '变量不是受支持的标量（或尝试写入整个复合类型）。', ['写入时请指定单个标量叶子路径，如 sensor.x 或 buf[0]。'], false],
     COMPOSITE_LAYOUT_MISSING: ['variable_resolution', '变量是复合类型，但当前 ELF 缺少可用的 DWARF 布局信息，无法展开成员。', ['使用包含 DWARF 调试信息的 Debug 构建重新编译（-g 且不 strip），并在 EmberProbe 侧边栏重新选择 ELF 后重试。', '单个标量变量的读取不受影响。'], false],
     INVALID_VARIABLE_PATH: ['variable_resolution', '变量成员路径无效：基名不是复合类型，或路径无法在布局中解析。', ['确认路径写法，如 sensor.x、buf[0]、buf[1:5]。', '使用 --list 检查 ELF 符号与展开能力。'], false],
+    CONFIG_KEY_FORBIDDEN: ['configuration', '该配置键不允许通过 Agent Bridge 修改（如 openocdPath 可将探针调用引向任意可执行文件）。', ['openocdPath 等安全敏感配置请在 VS Code 设置或 EmberProbe 侧边栏中由用户修改。'], false],
     FAULT_READ_FAILED: ['target_connection', '未能读取到故障寄存器。', ['检查探针连接与目标供电，确认 MCU target 配置与实际芯片一致。'], true]
 };
 

@@ -51,6 +51,28 @@ try {
     assert.ok(joinedUris.length >= 4, "all extracted assets must use Uri.joinPath");
     assert.ok(fs.readdirSync(temp).some((file) => file.endsWith(".css")));
     assert.ok(fs.readdirSync(temp).some((file) => file.endsWith(".js")));
+
+    // 旧哈希资产在重新 externalize 后被清理；其他 scope 与无关文件不受影响
+    const staleSidebar = path.join(temp, "sidebar-style-0-deadbeef.css");
+    const staleOtherScope = path.join(temp, "live-style-0-deadbeef.css");
+    const unrelated = path.join(temp, "notes.txt");
+    fs.writeFileSync(staleSidebar, "old");
+    fs.writeFileSync(staleOtherScope, "old");
+    fs.writeFileSync(unrelated, "keep");
+    externalizeWebviewHtml({
+        html: modernView.getModernWebviewContent({ elf: "", debugger: "", mcu: "", svd: "" }, "en"),
+        webview,
+        vscode,
+        assetRootUri,
+        scope: "sidebar"
+    });
+    assert.ok(!fs.existsSync(staleSidebar), "stale assets of the same scope must be pruned");
+    assert.ok(fs.existsSync(staleOtherScope), "assets of other scopes must be preserved");
+    assert.ok(fs.existsSync(unrelated), "unrelated files must be preserved");
+    assert.ok(
+        fs.readdirSync(temp).some((file) => file.startsWith("sidebar-")),
+        "current sidebar assets must survive pruning"
+    );
     console.log("Webview asset and CSP tests passed");
 } finally {
     fs.rmSync(temp, { recursive: true, force: true });

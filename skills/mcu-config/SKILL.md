@@ -19,6 +19,6 @@ Use `scripts/config.js` from this skill directory. Never edit VS Code storage or
    node <skill-dir>/scripts/config.js --workspace <workspace> --set debugger=cmsis-dap.cfg,mcu=stm32f4x.cfg
    ```
 
-3. Supported keys are `elf`, `debugger`, `mcu`, `svd`, `openocdPath`, `sampleIntervalMs`, `tclPort`, and `maxSamples`.
+3. Supported keys are `elf`, `debugger`, `mcu`, `svd`, `sampleIntervalMs`, `tclPort`, and `maxSamples`. `openocdPath` is read-only through the Agent Bridge (changing it can point probe calls at an arbitrary executable); instruct the user to change it in VS Code settings or the EmberProbe sidebar instead.
 4. Report the normalized configuration returned by EmberProbe. The extension validates paths, configuration names, numeric ranges, and synchronizes the sidebar immediately.
 5. On failure, parse the stderr JSON diagnostic and report its `error.code`, `likelyCause`, and `suggestedActions`. Do not guess a hardware or service cause for configuration-validation errors.

@@ -70,6 +70,16 @@ function globFirst(root, predicate) {
     return out;
 }
 
+// 解包路径断言：拒绝解析后落在 staging 目录之外的条目（Zip Slip 纵深防御；
+// node-tar 默认已剥离绝对路径与 ".."，此处显式校验以防未来版本行为变化）
+function assertSafeEntryPath(staging, entryPath) {
+    const target = path.resolve(staging, String(entryPath || ""));
+    const relative = path.relative(staging, target);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+        throw Object.assign(new Error(`Refusing unsafe archive entry: ${entryPath}`), { code: "UNSAFE_ARCHIVE_ENTRY" });
+    }
+}
+
 // 安装预置包到全局存储目录；progress(report) 上报进度，verifyBinary 在替换旧版本前验证暂存文件。
 // 返回 { ok, path?, version?, error? }；path 为 openocd 可执行文件绝对路径。
 async function installBundledOpenOcd(vscode, context, progress, verifyBinary) {
@@ -98,6 +108,7 @@ async function installBundledOpenOcd(vscode, context, progress, verifyBinary) {
             // 安全：剥离绝对路径与 .. 遍历（tar 包内均为相对路径，额外防御）
             preserveOwner: false,
             onentry: (entry) => {
+                assertSafeEntryPath(staging, entry.path);
                 processed++;
                 if (progress && processed % 10 === 0) {
                     const pct = Math.min(99, Math.round(processed / total * 100));
@@ -151,6 +162,7 @@ module.exports = {
     installDir,
     locateOpenOcdBinary,
     installBundledOpenOcd,
+    assertSafeEntryPath,
     BUNDLED_DIR,
     OPENOCD_BIN
 };

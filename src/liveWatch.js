@@ -8,6 +8,21 @@ const { clampInteger } = require("./validation");
 
 const SUB = "\x1a"; // Tcl-RPC 命令/响应分帧符 0x1A
 
+// 让操作系统分配一个当前空闲的临时端口。OpenOCD 的 Tcl 端口无认证，固定端口会让
+// 采样期间的任意本机进程都能连接并下发 halt/write_memory；未显式配置端口时应随机选用。
+function findFreePort() {
+    return new Promise(resolve => {
+        const server = net.createServer();
+        server.unref();
+        server.once("error", () => resolve(0));
+        server.listen(0, "127.0.0.1", () => {
+            const address = server.address();
+            const port = address && typeof address === "object" ? address.port : 0;
+            server.close(() => resolve(port));
+        });
+    });
+}
+
 // 解析 read_memory / ocd_read_memory 的返回值：支持十进制、0x 前缀，并剥离可能的地址标签
 function parseMemoryValues(text) {
     if (!text) return [];
@@ -405,4 +420,4 @@ class LiveWatchSession {
     }
 }
 
-module.exports = { LiveWatchSession, parseMemoryValues, isSafeCfg };
+module.exports = { LiveWatchSession, parseMemoryValues, isSafeCfg, findFreePort };

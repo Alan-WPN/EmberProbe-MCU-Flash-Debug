@@ -19,6 +19,21 @@ const NUMBER_RANGES = Object.freeze({
     maxSamples: [100, 100000]
 });
 
+// Agent Bridge 禁止修改的配置键：openocdPath 可把探针调用引向任意可执行文件（token → 本地执行链），
+// 修改必须由用户在 VS Code 设置或侧边栏中完成；UI 路径不经过 store.update，不受此断言影响。
+const AGENT_FORBIDDEN_KEYS = Object.freeze(["openocdPath"]);
+
+function assertAgentSettable(values) {
+    for (const key of Object.keys(values || {})) {
+        if (AGENT_FORBIDDEN_KEYS.includes(key)) {
+            throw Object.assign(new Error(`Configuration key cannot be modified through the Agent Bridge: ${key}`), {
+                code: "CONFIG_KEY_FORBIDDEN",
+                retryable: false
+            });
+        }
+    }
+}
+
 class ConfigurationStore {
     constructor(options) {
         this.vscode = options.vscode;
@@ -117,4 +132,4 @@ class ConfigurationStore {
     }
 }
 
-module.exports = { ConfigurationStore, ALLOWED_KEYS, NUMBER_RANGES };
+module.exports = { ConfigurationStore, ALLOWED_KEYS, NUMBER_RANGES, AGENT_FORBIDDEN_KEYS, assertAgentSettable };

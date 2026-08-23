@@ -3,7 +3,7 @@ const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { ConfigurationStore } = require("../src/services/configurationStore");
+const { ConfigurationStore, assertAgentSettable } = require("../src/services/configurationStore");
 const { FlashService } = require("../src/services/flashService");
 const { FaultService } = require("../src/services/faultService");
 const { AgentService } = require("../src/services/agentService");
@@ -58,6 +58,18 @@ const { AgentService } = require("../src/services/agentService");
             (error) => error.code === "INVALID_CONFIG_VALUE"
         );
 
+        // Agent Bridge 禁改键：openocdPath 可把探针调用引向任意可执行文件，必须拒绝
+        assert.throws(
+            () => assertAgentSettable({ openocdPath: "/tmp/evil" }),
+            (error) => error.code === "CONFIG_KEY_FORBIDDEN" && error.retryable === false
+        );
+        assert.throws(
+            () => assertAgentSettable({ mcu: "stm32f4x.cfg", openocdPath: "openocd" }),
+            (error) => error.code === "CONFIG_KEY_FORBIDDEN"
+        );
+        assert.doesNotThrow(() => assertAgentSettable({ mcu: "stm32f4x.cfg", tclPort: 7777 }));
+        assert.doesNotThrow(() => assertAgentSettable(undefined));
+
         let flashOptions;
         const flash = new FlashService({
             runOpenOcd: async (_vscode, options, progress) => {
@@ -93,21 +105,25 @@ const { AgentService } = require("../src/services/agentService");
         assert.strictEqual(faultResult.faultDetected, true);
 
         class FakeBridge {
-            constructor(workspace, handler) {
+            constructor(workspace, handler, storageDir) {
                 this.workspace = workspace;
                 this.handler = handler;
+                this.storageDir = storageDir;
                 this.stopped = false;
             }
             async start() {
-                return { workspace: this.workspace };
+                return { workspace: this.workspace, storageDir: this.storageDir };
             }
             async stop() {
                 this.stopped = true;
             }
         }
+        const bridgeCalls = [];
         const agent = new AgentService({
             Bridge: FakeBridge,
             workspaceProvider: () => temp,
+            storageDirProvider: () => path.join(temp, "global-storage"),
+            onCall: (method) => bridgeCalls.push(method),
             handlers: {
                 "config.get": async () => ({ ok: true }),
                 "chip.read": async () => ({ core: "Cortex-M4", pc: "0x1", secret: "hidden" })
@@ -121,7 +137,9 @@ const { AgentService } = require("../src/services/agentService");
             () => agent.call("missing"),
             (error) => error.code === "METHOD_NOT_FOUND"
         );
-        assert.deepStrictEqual(await agent.start(), { workspace: temp });
+        // onCall 钩子在每次调用前触发（capabilities 除外），供扩展侧做安全检查
+        assert.deepStrictEqual(bridgeCalls, ["config.get", "chip.read"]);
+        assert.deepStrictEqual(await agent.start(), { workspace: temp, storageDir: path.join(temp, "global-storage") });
         const bridge = agent.bridge;
         await agent.stop();
         assert.strictEqual(bridge.stopped, true);

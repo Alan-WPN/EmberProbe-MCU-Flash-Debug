@@ -19,12 +19,20 @@ function serializeError(error) {
 }
 
 class AgentBridge {
-    constructor(workspace, handler) {
+    // storageDir 为扩展 globalStorage 目录；提供时描述文件（含 token）写入用户目录而非工作区，
+    // 工作区只保留不含 token 的指针文件，避免令牌随 git 提交/云同步泄露。未提供时保持旧行为。
+    constructor(workspace, handler, storageDir) {
         this.workspace = path.resolve(workspace);
         this.handler = handler;
         this.server = null;
         this.token = crypto.randomBytes(24).toString("hex");
-        this.descriptorPath = path.join(this.workspace, ".emberprobe", "agent-bridge.json");
+        this.pointerPath = path.join(this.workspace, ".emberprobe", "agent-bridge.json");
+        if (storageDir) {
+            const workspaceKey = crypto.createHash("sha256").update(this.workspace).digest("hex").slice(0, 16);
+            this.descriptorPath = path.join(storageDir, `agent-bridge-${workspaceKey}.json`);
+        } else {
+            this.descriptorPath = this.pointerPath;
+        }
     }
 
     async start() {
@@ -37,6 +45,10 @@ class AgentBridge {
         const descriptor = this.descriptor();
         await fs.mkdir(path.dirname(this.descriptorPath), { recursive: true });
         await fs.writeFile(this.descriptorPath, JSON.stringify(descriptor, null, 2), { mode: 0o600 });
+        if (this.pointerPath !== this.descriptorPath) {
+            await fs.mkdir(path.dirname(this.pointerPath), { recursive: true });
+            await fs.writeFile(this.pointerPath, JSON.stringify({ protocol: 1, descriptorPath: this.descriptorPath }, null, 2));
+        }
         return descriptor;
     }
 
@@ -97,7 +109,16 @@ class AgentBridge {
         if (server) await new Promise(resolve => server.close(resolve));
         try {
             const current = JSON.parse(await fs.readFile(this.descriptorPath, "utf8"));
-            if (current.token === this.token) await fs.unlink(this.descriptorPath);
+            if (current.token === this.token) {
+                await fs.unlink(this.descriptorPath).catch(() => {});
+                // 指针文件只含路径不含令牌；仍指向本实例的描述文件时一并删除，避免留下悬空引用
+                if (this.pointerPath !== this.descriptorPath) {
+                    try {
+                        const pointer = JSON.parse(await fs.readFile(this.pointerPath, "utf8"));
+                        if (pointer.descriptorPath === this.descriptorPath) await fs.unlink(this.pointerPath);
+                    } catch { /* pointer may already be gone */ }
+                }
+            }
         } catch { /* descriptor may already be gone */ }
     }
 }

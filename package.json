@@ -109,7 +109,7 @@
         "emberprobe.tclPort": {
           "type": "number",
           "default": 6666,
-          "description": "实时变量查看使用的 OpenOCD Tcl-RPC 端口"
+          "description": "实时变量采样使用的 OpenOCD Tcl-RPC 端口；显式配置后固定使用该端口，未显式配置时自动选用随机临时端口（OpenOCD Tcl 端口无认证，建议保持随机）"
         },
         "emberprobe.sampleIntervalMs": {
           "type": "number",

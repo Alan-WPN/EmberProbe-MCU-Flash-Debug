@@ -276,6 +276,7 @@ const STRINGS = {
         'msg.skillsInstalled': 'EmberProbe Agent Skills 已安装到当前工作区',
         'msg.skillsInstalledGlobal': 'EmberProbe Agent Skills 已安装到用户主目录 ~/.agents/skills',
         'msg.skillsDiffers': '已安装的 Agent Skills 与插件内置版本存在差异，可重新安装进行升级',
+        'msg.skillsModifiedBridgeWarn': '检测到已安装的 Agent Skills 被本地修改，经其发起的请求可能执行被篡改的脚本，建议重新安装',
         'msg.skillsManage': '管理',
         'msg.skillsUninstalled': 'EmberProbe Agent Skills 已从当前项目移除',
         'msg.skillsUninstalledGlobal': 'EmberProbe Agent Skills 已从全局目录移除',
@@ -605,6 +606,7 @@ const STRINGS = {
         'msg.skillsInstalled': 'EmberProbe Agent Skills installed into the current workspace',
         'msg.skillsInstalledGlobal': 'EmberProbe Agent Skills installed to ~/.agents/skills for all projects',
         'msg.skillsDiffers': 'Installed Agent Skills differ from the bundled version; reinstall to upgrade',
+        'msg.skillsModifiedBridgeWarn': 'Installed Agent Skills have local modifications; requests routed through them may run tampered scripts. Reinstalling is recommended',
         'msg.skillsManage': 'Manage',
         'msg.skillsUninstalled': 'EmberProbe Agent Skills removed from the current project',
         'msg.skillsUninstalledGlobal': 'EmberProbe Agent Skills removed from the global directory',
@@ -692,4 +694,9 @@ function matchVscodeLang(lang) {
     return String(lang || '').toLowerCase().startsWith('zh') ? 'zh' : 'en';
 }
 
-module.exports = { STRINGS, t, interpolate, DEFAULT_LANG, SUPPORTED_LANGS, normalizeLang, matchVscodeLang };
+// JSON 序列化用于内嵌 <script> 时转义 "<"，防止文案中出现 "</script>" 提前闭合脚本标签造成注入。
+function jsonForScript(value) {
+    return JSON.stringify(value).replace(/</g, '\\u003c');
+}
+
+module.exports = { STRINGS, t, interpolate, DEFAULT_LANG, SUPPORTED_LANGS, normalizeLang, matchVscodeLang, jsonForScript };

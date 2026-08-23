@@ -1,5 +1,5 @@
 "use strict";
-const { STRINGS, t, normalizeLang } = require("./i18n");
+const { STRINGS, t, normalizeLang, jsonForScript } = require("./i18n");
 // 独立实时变量面板：无外部依赖，使用高 DPI Canvas 绘制曲线。
 // 采样序列 → RFC 4180 CSV：time 列（ISO 8601 UTC）+ 每变量一列，行尾 CRLF，带 UTF-8 BOM；
 // 各序列按采样时间戳对齐（同一 tick 共享同一时刻），晚加入的序列起始前留空单元格
@@ -33,7 +33,7 @@ function getLiveWatchContent(cfg, lang) {
         maxSamples: Math.min(20000, Math.max(100, Number(raw.maxSamples) || 2000)),
         intervalMs: Math.min(10000, Math.max(20, Number(raw.intervalMs) || 100))
     };
-    const L = normalizeLang(lang), tr = (k, p) => t(L, k, p), i18nJson = JSON.stringify(STRINGS);
+    const L = normalizeLang(lang), tr = (k, p) => t(L, k, p), i18nJson = jsonForScript(STRINGS);
     return `<!doctype html><html lang="${L==='zh'?'zh-CN':'en'}"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none';script-src 'unsafe-inline';style-src 'unsafe-inline';">
@@ -50,7 +50,7 @@ html,body{width:100%;height:100%;overflow:hidden}body{display:flex;flex-directio
 <div class="group"><label><span data-i18n="lw.window">${tr('lw.window')}</span> <select id="timeWindow"><option value="10" data-i18n="lw.sec10">${tr('lw.sec10')}</option><option value="30" selected data-i18n="lw.sec30">${tr('lw.sec30')}</option><option value="60" data-i18n="lw.sec60">${tr('lw.sec60')}</option><option value="0" data-i18n="lw.all">${tr('lw.all')}</option></select></label><button id="freeze" class="ghost">${tr('lw.freeze')}</button><button id="norm" class="ghost" data-i18n="lw.normalize" data-i18n-title="lw.normalized" title="${tr('lw.normalized')}">${tr('lw.normalize')}</button><button id="clear" class="ghost" data-i18n="lw.clear">${tr('lw.clear')}</button><button id="export" class="ghost" data-i18n="lw.exportCsv" data-i18n-title="lw.exportCsvTitle" title="${tr('lw.exportCsvTitle')}">${tr('lw.exportCsv')}</button></div>
 </div></div><main class="layout" id="layout"><aside class="side"><div class="side-head"><strong data-i18n="lw.currentValues">${tr('lw.currentValues')}</strong><span class="badge" id="count">0</span><span id="rate">0 Hz</span></div><div class="var-list" id="vars"><div class="empty" data-i18n="lw.varListEmpty">${tr('lw.varListEmpty')}</div></div></aside><div class="side-splitter" id="sideSplitter" data-i18n-title="lw.splitterHint" title="${tr('lw.splitterHint')}"></div><section class="chart-pane"><div class="chart-head"><strong data-i18n="lw.history">${tr('lw.history')}</strong><span id="range">—</span><span class="spacer"></span><span id="points">${tr('lw.points',{n:0})}</span></div><div class="chart-wrap" id="chartWrap"><canvas id="chart"></canvas><div class="chart-empty" id="chartEmpty" data-i18n="lw.chartEmpty">${tr('lw.chartEmpty')}</div></div></section></main>
 <div class="overlay hidden" id="overlay"><div class="panel"><h3 data-i18n="lw.importTitle">${tr('lw.importTitle')}</h3><div class="filter-wrap"><input id="impFilter" data-i18n-ph="lw.filterVars" placeholder="${tr('lw.filterVars')}"><button class="filter-clear" id="impFilterClear" type="button" data-i18n-title="lw.clearFilter" title="${tr('lw.clearFilter')}" aria-label="${tr('lw.clearFilter')}">×</button></div><div class="warn" id="impWarn"></div><div class="imp-meta" id="impCount"></div><div class="imp-list" id="impList"></div><div class="right"><button class="secondary" id="impCancel" data-i18n="lw.cancel">${tr('lw.cancel')}</button><button id="impAdd" data-i18n="lw.importSelected">${tr('lw.importSelected')}</button></div></div></div>
-<script>window.__CFG__=${JSON.stringify(conf)};window.__LANG__=${JSON.stringify(L)};window.__I18N__=${i18nJson};</script><script>
+<script>window.__CFG__=${jsonForScript(conf)};window.__LANG__=${jsonForScript(L)};window.__I18N__=${i18nJson};</script><script>
 var api=window.acquireVsCodeApi?window.acquireVsCodeApi():null,CFG=window.__CFG__,MAXPTS=CFG.maxSamples;
 var I18N=window.__I18N__||{zh:{},en:{}};var LANG=(window.__LANG__==='en')?'en':'zh';
 function t(k,p){var tb=I18N[LANG]||I18N.zh||{};var s=(tb[k]!=null)?tb[k]:((I18N.zh&&I18N.zh[k]!=null)?I18N.zh[k]:k);return String(s).replace(/{([a-zA-Z0-9_]+)}/g,function(mm,n){return (p&&p[n]!=null)?String(p[n]):''})}
