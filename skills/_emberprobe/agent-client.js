@@ -4,13 +4,17 @@ const path = require("path");
 const http = require("http");
 
 function descriptor(workspace) {
-    const pointerFile = path.join(path.resolve(workspace || process.cwd()), ".emberprobe", "agent-bridge.json");
+    const root = path.resolve(workspace || process.cwd());
+    const currentPointer = path.join(root, ".agents", "skills", "_emberprobe", "agent-bridge.json");
+    const legacyPointer = path.join(root, ".emberprobe", "agent-bridge.json");
+    // 新安装把指针与共享 Skill 运行时放在一起；升级过渡期仍可读取旧位置。
+    const pointerFile = fs.existsSync(currentPointer) ? currentPointer : legacyPointer;
     let pointer;
     try { pointer = JSON.parse(fs.readFileSync(pointerFile, "utf8")); }
     catch {
         throw Object.assign(new Error("EmberProbe Agent Bridge descriptor is unavailable."), {
             code: "BRIDGE_UNAVAILABLE",
-            details: { descriptor: pointerFile }
+            details: { descriptor: currentPointer }
         });
     }
     // 新格式：工作区文件为指针（不含 token），真实描述文件位于用户目录；旧格式直接存 token 则原地读取

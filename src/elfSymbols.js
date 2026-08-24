@@ -2,6 +2,8 @@
 // 纯 JS 解析 ELF32（小端，Cortex-M）符号表，提取全局/静态变量的地址与大小。
 // 说明：本模块为受 MCUViewer（GPLv3）的 Variable Viewer 概念启发的独立实现，未使用其任何代码。
 
+const elfFormat = require("./elfFormat");
+
 const SUPPORTED_TYPES = ['u8', 'i8', 'u16', 'i16', 'u32', 'i32', 'f32'];
 
 // 各标量类型的字节宽度（不支持 64 位，与 MCUViewer 1.1.0 一致）
@@ -87,61 +89,36 @@ function encodeValue(value, type) {
     return Array.from(new Uint8Array(view.buffer));
 }
 
+// 从 src 的 offset 起按小端读取一个标量（decodeValue 与 decodeComposite 共用的唯一实现）
+function decodeScalarAt(view, offset, type) {
+    switch (type) {
+        case 'u8': return view.getUint8(offset);
+        case 'i8': return view.getInt8(offset);
+        case 'u16': return view.getUint16(offset, true);
+        case 'i16': return view.getInt16(offset, true);
+        case 'u32': return view.getUint32(offset, true);
+        case 'i32': return view.getInt32(offset, true);
+        case 'f32': return view.getFloat32(offset, true);
+        default: return null;
+    }
+}
+
 // 将原始小端字节按类型解码为数值；bytes 可为 Buffer / Uint8Array / number[]
 function decodeValue(bytes, type) {
     const need = typeByteLength(type);
     if (!bytes || bytes.length < need) return null;
     const view = new DataView(Uint8Array.from(bytes).buffer);
-    switch (type) {
-        case 'u8': return view.getUint8(0);
-        case 'i8': return view.getInt8(0);
-        case 'u16': return view.getUint16(0, true);
-        case 'i16': return view.getInt16(0, true);
-        case 'u32': return view.getUint32(0, true);
-        case 'i32': return view.getInt32(0, true);
-        case 'f32': return view.getFloat32(0, true);
-        default: return null;
-    }
+    return decodeScalarAt(view, 0, type);
 }
 
 // 解析 ELF32 符号表，返回 { symbols: [{name,address,size}], warnings: [] }
 function parseElfSymbols(buffer) {
     const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
-    if (buf.length < 52) throw new Error('文件过小，不是有效的 ELF');
-    if (!(buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46)) {
-        throw new Error('不是有效的 ELF 文件（魔数不匹配）');
-    }
-    const eiClass = buf[4]; // 1 = 32 位
-    const eiData = buf[5];  // 1 = 小端
-    if (eiClass !== 1) throw new Error('仅支持 32 位 ELF（Cortex-M）');
-    if (eiData !== 1) throw new Error('仅支持小端 ELF（Cortex-M）');
-
+    const header = elfFormat.readElf32Header(buf);
     const warnings = [];
-    const eMachine = buf.readUInt16LE(18);
-    if (eMachine !== 0x28) warnings.push(`e_machine=0x${eMachine.toString(16)} 非 ARM，解析结果可能不准确`);
+    if (header.machine !== 0x28) warnings.push(`e_machine=0x${header.machine.toString(16)} 非 ARM，解析结果可能不准确`);
 
-    const eShoff = buf.readUInt32LE(32);
-    const eShentsize = buf.readUInt16LE(46) || 40;
-    const eShnum = buf.readUInt16LE(48);
-    if (!eShoff || !eShnum) throw new Error('缺少节头表，可能已被 strip（请用 Debug 构建）');
-    if (eShentsize < 40 || eShoff + eShnum * eShentsize > buf.length) {
-        throw new Error('ELF 节头表越界或条目大小无效');
-    }
-
-    // 读取全部节头（仅取解析符号所需字段）
-    const sections = [];
-    for (let i = 0; i < eShnum; i++) {
-        const off = eShoff + i * eShentsize;
-        if (off + 40 > buf.length) break;
-        sections.push({
-            type: buf.readUInt32LE(off + 4),
-            offset: buf.readUInt32LE(off + 16),
-            size: buf.readUInt32LE(off + 20),
-            link: buf.readUInt32LE(off + 24),
-            entsize: buf.readUInt32LE(off + 36)
-        });
-    }
-
+    const sections = elfFormat.readSectionEntries(buf, header);
     const SHT_SYMTAB = 2;
     const SHT_DYNSYM = 11;
     let symtab = sections.find(s => s.type === SHT_SYMTAB) || sections.find(s => s.type === SHT_DYNSYM);
@@ -211,47 +188,11 @@ function parseElfSymbols(buffer) {
 // 返回 { sections: [{name,type,addr,offset,size,flags}], programHeaders: [{vaddr,paddr,filesz,memsz,flags}] }
 function parseElfSections(buffer) {
     const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
-    if (buf.length < 52) throw new Error('文件过小，不是有效的 ELF');
-    if (!(buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46)) {
-        throw new Error('不是有效的 ELF 文件（魔数不匹配）');
-    }
-    if (buf[4] !== 1) throw new Error('仅支持 32 位 ELF（Cortex-M）');
-    if (buf[5] !== 1) throw new Error('仅支持小端 ELF（Cortex-M）');
-
-    const eShoff = buf.readUInt32LE(32);
-    const eShentsize = buf.readUInt16LE(46) || 40;
-    const eShnum = buf.readUInt16LE(48);
-    const eShstrndx = buf.readUInt16LE(50);
-    if (!eShoff || !eShnum) throw new Error('缺少节头表，可能已被 strip（请用 Debug 构建）');
-    if (eShentsize < 40 || eShoff + eShnum * eShentsize > buf.length) {
-        throw new Error('ELF 节头表越界或条目大小无效');
-    }
-    const raw = [];
-    for (let i = 0; i < eShnum; i++) {
-        const off = eShoff + i * eShentsize;
-        if (off + 40 > buf.length) break;
-        raw.push({
-            nameOffset: buf.readUInt32LE(off + 0),
-            type: buf.readUInt32LE(off + 4),
-            flags: buf.readUInt32LE(off + 8),
-            addr: buf.readUInt32LE(off + 12) >>> 0,
-            offset: buf.readUInt32LE(off + 16),
-            size: buf.readUInt32LE(off + 20)
-        });
-    }
-    // 节名字符串表（shstrtab）
-    const shstr = raw[eShstrndx];
-    const readName = (rel) => {
-        if (!shstr || rel < 0) return '';
-        const p = shstr.offset + rel;
-        const limit = shstr.offset + shstr.size;
-        if (p >= limit || limit > buf.length) return '';
-        let end = p;
-        while (end < limit && buf[end] !== 0) end++;
-        return buf.toString('utf8', p, end);
-    };
-    const sections = raw.map(s => ({
-        name: readName(s.nameOffset),
+    const header = elfFormat.readElf32Header(buf);
+    const entries = elfFormat.readSectionEntries(buf, header);
+    const names = elfFormat.readSectionNames(buf, entries, header.shstrndx);
+    const sections = entries.map((s, i) => ({
+        name: names[i],
         type: s.type,
         addr: s.addr,
         offset: s.offset,
@@ -259,13 +200,11 @@ function parseElfSections(buffer) {
         flags: s.flags
     }));
 
-    const ePhoff = buf.readUInt32LE(28);
-    const ePhentsize = buf.readUInt16LE(42) || 32;
-    const ePhnum = buf.readUInt16LE(44);
+    const { phoff, phentsize, phnum } = header;
     const programHeaders = [];
-    if (ePhoff && ePhnum && ePhentsize >= 32 && ePhoff + ePhnum * ePhentsize <= buf.length) {
-        for (let i = 0; i < ePhnum; i++) {
-            const off = ePhoff + i * ePhentsize;
+    if (phoff && phnum && phentsize >= 32 && phoff + phnum * phentsize <= buf.length) {
+        for (let i = 0; i < phnum; i++) {
+            const off = phoff + i * phentsize;
             programHeaders.push({
                 type: buf.readUInt32LE(off + 0),
                 offset: buf.readUInt32LE(off + 4),
@@ -398,21 +337,10 @@ function expandCompositeLeaves(symbol, layout, pathSpec) {
                 } else if (seg.kind === 'all') {
                     // 全部
                 }
-                // 如果有剩余路径段，说明是嵌套访问（如 buf[0].x）
-                if (remainingSegments.length > 0 && elemType.kind === 'struct') {
-                    // 对范围内的每个元素递归展开
-                    const subPath = { base: symbol.name, segments: remainingSegments };
-                    for (let i = rangeStart; i < rangeEnd; i++) {
-                        const elemOffset = currentOffset + i * elemSize;
-                        const elemPath = currentPath + '[' + i + ']';
-                        if (elemType.kind === 'struct' || elemType.kind === 'union') {
-                            // 需要元素类型的 layout，但数组的 elementType 不含成员信息
-                            // 这种情况下 compositeLayout 的 elementType 是标量信息
-                            // 嵌套复合数组的处理依赖 compositeLayout 中的成员信息
-                        }
-                    }
-                    return;
-                }
+                // 嵌套路径段（如 buf[1:5].x）作用于复合元素时无法在此展开——walk 只消费
+                // 首段，复合成员导航由下方的路径导航层负责。现状为不输出，交由导航层
+                // 用单段路径（buf[1:5]）或成员段先行（buf[0].x）表达。
+                if (remainingSegments.length > 0 && elemType.kind === 'struct') return;
             }
             // 展开标量元素
             if (elemType.compositeLayout) {
@@ -506,22 +434,13 @@ function expandCompositeLeaves(symbol, layout, pathSpec) {
 function decodeComposite(bytes, layout) {
     if (!bytes || !layout) return null;
     const src = Uint8Array.from(bytes);
+    const view = new DataView(src.buffer, src.byteOffset);
 
-    function decodeScalar(offset, type) {
+    const decodeScalar = (offset, type) => {
         const width = typeByteLength(type);
         if (offset < 0 || offset + width > src.length) return null;
-        const view = new DataView(src.buffer, src.byteOffset + offset, width);
-        switch (type) {
-            case 'u8': return view.getUint8(0);
-            case 'i8': return view.getInt8(0);
-            case 'u16': return view.getUint16(0, true);
-            case 'i16': return view.getInt16(0, true);
-            case 'u32': return view.getUint32(0, true);
-            case 'i32': return view.getInt32(0, true);
-            case 'f32': return view.getFloat32(0, true);
-            default: return null;
-        }
-    }
+        return decodeScalarAt(view, offset, type);
+    };
 
     // offset 为该节点相对变量基址的绝对字节偏移，供 UI/Agent 计算成员地址与定位路径。
     function decodeLayout(offset, lyt) {

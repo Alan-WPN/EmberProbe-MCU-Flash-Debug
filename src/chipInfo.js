@@ -2,8 +2,8 @@
 // 通过 OpenOCD 一次性读取芯片基本信息（小栏目定位：快速确认连接状态、芯片系列、调试链路与运行状态）。
 // 仅 init、不复位。读取身份信息（Device ID/Flash/UID）时若芯片在运行会短暂 halt→读取→resume（H7 等运行态下读取不可靠）；
 // 运行信息(PC/SP/LR)仅在芯片“原本已暂停”时读取，绝不为展示它而暂停运行中的程序。读取完成后立即 shutdown。
-const { spawn } = require("child_process");
 const { isSafeCfg, parseLine } = require("./openocdRunner");
+const { runOpenOcdOnce } = require("./services/openocdExec");
 
 // Cortex-M SCB CPUID(0xE000ED00) 的 part number → 内核名称
 const CORTEX_M_PARTS = {
@@ -270,7 +270,7 @@ function formatUid(words) {
 
 // 一次性读取芯片信息。options: { executable, probe, target, cwd }
 // 成功 resolve 结构化信息对象；连接/识别失败时 reject 并带排查线索。
-function readChipInfo(vscode, options, onProgress) {
+async function readChipInfo(vscode, options, onProgress) {
     if (!isSafeCfg(options.probe) || !isSafeCfg(options.target)) {
         return Promise.reject(new Error(`非法的 OpenOCD 配置名：${options.probe} / ${options.target}`));
     }
@@ -278,8 +278,7 @@ function readChipInfo(vscode, options, onProgress) {
     const uidBase = uidBaseForTarget(options.target);
     const idcodeBase = idcodeBaseForTarget(options.target);
     const flashSizeBase = flashSizeBaseForTarget(options.target);
-    return new Promise((resolve, reject) => {
-        // 每条读取命令用 catch 包裹，保证单条失败不影响其余命令，最终 shutdown 干净退出。
+    // 每条读取命令用 catch 包裹，保证单条失败不影响其余命令，最终 shutdown 干净退出。
         // 身份信息（Device ID/Flash/UID）在运行态下（尤其 H7）读取不可靠：若芯片在运行，
         // 则在本块内短暂 halt→读取→resume；原本已暂停则直接读。运行信息(PC/SP/LR)仍仅在“原本已暂停”时读取。
         // 身份寄存器按全家族候选地址扫描（目标配置可能选错），收尾时按真实家族选值
@@ -307,16 +306,6 @@ function readChipInfo(vscode, options, onProgress) {
             'catch { if {[[target current] curstate] eq "halted"} { catch { echo [reg pc] }; catch { echo [reg sp] }; catch { echo [reg lr] } } }',
             'shutdown'
         ];
-        const args = ['-f', `interface/${options.probe}`, '-f', `target/${options.target}`];
-        for (const c of cmds) { args.push('-c', c); }
-
-        let child;
-        try {
-            child = spawn(options.executable, args, { cwd: options.cwd, windowsHide: true, shell: false });
-        } catch (error) {
-            reject(error.code === 'ENOENT' ? Object.assign(new Error(`找不到 OpenOCD：${options.executable}`), { i18nKey: 'run.notFound', i18nParams: { path: options.executable } }) : new Error(error.message));
-            return;
-        }
         report({ stage: 'start', message: '正在读取芯片信息…' });
         const info = {
             // 内核
@@ -339,27 +328,8 @@ function readChipInfo(vscode, options, onProgress) {
         const idcReads = {}, flsReads = {}, uidReads = {};
         let idcodeLog = ''; // OpenOCD flash 驱动自报的 device id（仅作最后回退）
         let transportLog = '';
-        let pending = '';
-        let settled = false;
-        let spawnFailed = false;
-
-        const finish = (err) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            try { report({ stage: 'raw', commands: cmds.slice(), lines: rawAll.slice() }); } catch (e) { /* ignore */ }
-            if (err) reject(err);
-            else resolve(info);
-        };
-        // 正常流程会 shutdown 退出；超时兜底避免探针异常时永久挂起
-        const timer = setTimeout(() => {
-            if (settled) return;
-            try { child.kill(); } catch (e) { /* ignore */ }
-            finish(Object.assign(new Error('读取芯片信息超时（15s）：请检查接线、供电与探针占用情况'), { i18nKey: 'chip.timeout' }));
-        }, 15000);
-
         const handleLine = (raw) => {
-            const clean = raw.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '').trim();
+            const clean = raw;
             if (!clean) return;
             rawTail.push(clean);
             if (rawTail.length > 12) rawTail.shift();
@@ -459,21 +429,22 @@ function readChipInfo(vscode, options, onProgress) {
             else if (event.stage === 'error') { if (!errors.includes(event.message)) errors.push(event.message); }
         };
 
-        const consume = (chunk) => {
-            pending += chunk.toString();
-            const lines = pending.split(/\r?\n/);
-            pending = lines.pop() || '';
-            for (const line of lines) handleLine(line);
-        };
-        child.stdout.on('data', consume);
-        child.stderr.on('data', consume);
-        child.on('error', (error) => {
-            spawnFailed = true;
-            finish(error.code === 'ENOENT' ? Object.assign(new Error(`找不到 OpenOCD：${options.executable}`), { i18nKey: 'run.notFound', i18nParams: { path: options.executable } }) : new Error(error.message));
-        });
-        child.on('close', (code) => {
-            if (spawnFailed) return; // spawn 失败已由 error 事件处理
-            if (pending) { handleLine(pending); pending = ''; }
+        let execution;
+        try {
+            execution = await runOpenOcdOnce({
+                executable: options.executable,
+                probe: options.probe,
+                target: options.target,
+                cwd: options.cwd,
+                timeoutMs: 15000,
+                buildCommands: () => cmds,
+                onLine: handleLine,
+                buildTimeoutError: () => Object.assign(new Error('读取芯片信息超时（15s）：请检查接线、供电与探针占用情况'), { i18nKey: 'chip.timeout' })
+            });
+        } finally {
+            try { report({ stage: 'raw', commands: cmds.slice(), lines: rawAll.slice() }); } catch (e) { /* ignore */ }
+        }
+        const code = execution.exitCode;
             if (!info.transport && transportLog) info.transport = transportLog;
             // IDCODE：先取任意候选地址上已知的 DEV_ID（目标选错也能命中），再采信 OpenOCD 自报值；
             // 两者都没有时，未收录 DEV_ID 仅允许从目标家族的 IDCODE 地址回退。
@@ -536,17 +507,14 @@ function readChipInfo(vscode, options, onProgress) {
             const gotAny = gotChip || info.targetName || info.clock || info.probeName;
             if (gotChip || (gotAny && !errors.length)) {
                 report({ stage: 'done', message: '读取完成' });
-                finish(null);
-                return;
+                return info;
             }
             let reasonErr;
             if (errors.length) reasonErr = new Error(errors.slice(-3).join('；'));
             else if (rawTail.length) reasonErr = new Error(rawTail.slice(-3).join('；'));
             else if (code === 0) reasonErr = Object.assign(new Error('未获取到芯片信息'), { i18nKey: 'chip.noInfo' });
             else reasonErr = Object.assign(new Error(`OpenOCD 退出码 ${code}`), { i18nKey: 'chip.exitCode', i18nParams: { code } });
-            finish(reasonErr);
-        });
-    });
+            throw reasonErr;
 }
 
 // 统一 Flash 容量展示：把 OpenOCD 的 "kbytes/kbyte" 归一为 "KiB"

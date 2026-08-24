@@ -171,6 +171,16 @@ async function uninstallSkill(vscode, context, lang, scope) {
             if ((await fs.readdir(targetRoot)).length === 0) await fs.rm(targetRoot, { recursive: true, force: true });
         } catch { /* 目录已不存在或无法移除 */ }
     }
+    // 新指针位于上面一并删除的 _emberprobe 运行时目录。这里额外清理旧版本可能
+    // 遗留在项目根目录的指针；只移除空目录，避免触碰用户的其它内容。
+    if (scope === "workspace") {
+        const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (workspace) {
+            const bridgeDir = path.join(workspace, ".emberprobe");
+            await fs.rm(path.join(bridgeDir, "agent-bridge.json"), { force: true });
+            await fs.rmdir(bridgeDir).catch(() => {});
+        }
+    }
     const status = await inspectSkills(vscode, context);
     if (removed) vscode.window.showInformationMessage(i18n.t(lang, scope === "global" ? "msg.skillsUninstalledGlobal" : "msg.skillsUninstalled"));
     return status;

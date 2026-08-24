@@ -2,9 +2,9 @@
 // 一次性读取 Cortex-M SCB 故障寄存器（CFSR/HFSR/DFSR/MMFAR/BFAR/ICSR/SHCSR）并解码故障位。
 // 模式同 chipInfo.readChipInfo：一次性 OpenOCD 命令行 + mdw 输出按地址分派。
 // 注意：OpenOCD 0.12.0 中 catch 会吞掉 mdw 输出，必须用 catch { echo [mdw ...] } 形式。
-const { spawn } = require("child_process");
 const { isSafeCfg, diagnoseOpenOcdFailure } = require("./openocdRunner");
 const { parseMdwDump, parseRegLine, parseKv } = require("./chipInfo");
+const { runOpenOcdOnce } = require("./services/openocdExec");
 
 // SCB 故障相关寄存器地址（Cortex-M3/M4/M7/M33 调试地址空间，运行态可直读）
 const FAULT_REGS = {
@@ -88,12 +88,11 @@ function decodeFaultRegisters(regs) {
 
 // 一次性读取故障寄存器与 CPU 寄存器。options: { executable, probe, target, cwd }
 // resolve { targetState, registers: {cfsr,...}（十六进制串）, values: {cfsr,...}（数值）, pc, sp, lr, xpsr }
-function readFaultInfo(options) {
+async function readFaultInfo(options) {
     if (!isSafeCfg(options.probe) || !isSafeCfg(options.target)) {
         return Promise.reject(new Error(`非法的 OpenOCD 配置名：${options.probe} / ${options.target}`));
     }
-    return new Promise((resolve, reject) => {
-        const regReads = Object.values(FAULT_REGS).map(a => `catch { echo [mdw 0x${a.toString(16)}] }`);
+    const regReads = Object.values(FAULT_REGS).map(a => `catch { echo [mdw 0x${a.toString(16)}] }`);
         // CPU 寄存器需 halt 才能读：记录原状态 → 非 halted 则 halt → 读取 → 若曾 halt 则 resume。
         // catch 会吞掉命令输出，寄存器行必须与 mdw 相同的 echo [...] 形式才能到达 stdout
         const cpuRegCmd = 'catch { set o [[target current] curstate]; set h 0; if {$o ne "halted"} { if {![catch {halt}]} { set h 1 } }; '
@@ -106,40 +105,12 @@ function readFaultInfo(options) {
             cpuRegCmd,
             'shutdown'
         ];
-        const args = ['-f', `interface/${options.probe}`, '-f', `target/${options.target}`];
-        for (const c of cmds) { args.push('-c', c); }
-
-        let child;
-        try {
-            child = spawn(options.executable, args, { cwd: options.cwd, windowsHide: true, shell: false });
-        } catch (error) {
-            reject(error.code === 'ENOENT' ? Object.assign(new Error(`找不到 OpenOCD：${options.executable}`), { i18nKey: 'run.notFound', i18nParams: { path: options.executable } }) : new Error(error.message));
-            return;
-        }
         const result = { targetState: '', registers: {}, values: {}, pc: '', sp: '', lr: '', xpsr: '' };
         const addrToKey = new Map(Object.entries(FAULT_REGS).map(([key, addr]) => [addr >>> 0, key]));
-        const logTail = [];
-        let pending = '';
-        let settled = false;
-
-        const finish = (err) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            if (err) reject(err);
-            else resolve(result);
-        };
-        const timer = setTimeout(() => {
-            if (settled) return;
-            try { child.kill(); } catch (e) { /* ignore */ }
-            finish(Object.assign(new Error('读取故障寄存器超时（15s）：请检查接线、供电与探针占用情况'), { i18nKey: 'chip.timeout' }));
-        }, 15000);
 
         const handleLine = (raw) => {
-            const clean = raw.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '').trim();
+            const clean = raw;
             if (!clean) return;
-            logTail.push(clean.slice(0, 500));
-            if (logTail.length > 20) logTail.shift();
             const kv = parseKv(clean);
             if (kv) {
                 if (kv.key === 'state' && kv.value) result.targetState = kv.value;
@@ -163,32 +134,20 @@ function readFaultInfo(options) {
                 }
             }
         };
-        const onData = (chunk) => {
-            pending += chunk.toString();
-            let idx;
-            while ((idx = pending.indexOf('\n')) >= 0) {
-                handleLine(pending.slice(0, idx));
-                pending = pending.slice(idx + 1);
-            }
-        };
-        child.stdout.on('data', onData);
-        child.stderr.on('data', onData);
-        child.on('error', (error) => {
-            finish(error.code === 'ENOENT'
-                ? Object.assign(new Error(`找不到 OpenOCD：${options.executable}`), { i18nKey: 'run.notFound', i18nParams: { path: options.executable } })
-                : new Error(error.message));
+        const execution = await runOpenOcdOnce({
+            executable: options.executable,
+            probe: options.probe,
+            target: options.target,
+            cwd: options.cwd,
+            timeoutMs: 15000,
+            buildCommands: () => cmds,
+            onLine: handleLine,
+            buildTimeoutError: () => Object.assign(new Error('读取故障寄存器超时（15s）：请检查接线、供电与探针占用情况'), { i18nKey: 'chip.timeout' })
         });
-        child.on('close', (code) => {
-            if (pending) handleLine(pending);
-            // 只要读到关键故障寄存器即视为成功；否则用 OpenOCD 日志归类失败原因
-            if (result.values.cfsr !== undefined || result.values.hfsr !== undefined) {
-                finish(null);
-                return;
-            }
-            const diagnostic = diagnoseOpenOcdFailure(logTail, { exitCode: code });
-            finish(Object.assign(new Error(diagnostic.message), diagnostic, { code: diagnostic.code || 'FAULT_READ_FAILED' }));
-        });
-    });
+        // 只要读到关键故障寄存器即视为成功；否则用 OpenOCD 日志归类失败原因
+        if (result.values.cfsr !== undefined || result.values.hfsr !== undefined) return result;
+        const diagnostic = diagnoseOpenOcdFailure(execution.openocdTail, { exitCode: execution.exitCode });
+        throw Object.assign(new Error(diagnostic.message), diagnostic, { code: diagnostic.code || 'FAULT_READ_FAILED' });
 }
 
 module.exports = { readFaultInfo, decodeFaultRegisters, FAULT_REGS, CFSR_BITS, HFSR_BITS };

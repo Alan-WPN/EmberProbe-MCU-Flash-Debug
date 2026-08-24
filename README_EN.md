@@ -31,7 +31,7 @@ The sidebar lists all global/static variables of the current ELF; click a variab
 ## Agent Skills
 
 - `mcu-download`: detects and downloads the newest ELF, reporting an ELF SHA-256 fingerprint during preflight and execution.
-- `mcu-live-watch`: reads once or analyzes trends. The startup, progress, and shutdown of temporary trend sampling are synchronized to the sidebar and chart. Workspaces with this Skill installed auto-activate the Agent Bridge. It can also add variables to the sidebar, chart, or both.
+- `mcu-live-watch`: reads once or analyzes trends. The startup, progress, and shutdown of temporary trend sampling are synchronized to the sidebar and chart. It can also add variables to the sidebar, chart, or both.
 - `mcu-chip-info`: reads chip info by the `identity`, `debug`, and `runtime` groups, or by specific fields.
 - `mcu-config`: reads or changes ELF, debugger, MCU, SVD, OpenOCD, and sampling parameters.
 - `mcu-var-write`: safely writes scalars or composite leaves by name with two-stage confirmation, ELF fingerprint binding, and read-back verification.
@@ -40,6 +40,8 @@ The sidebar lists all global/static variables of the current ELF; click a variab
 - `mcu-flash-verify`: reads target Flash and compares it with the loadable contents of the current ELF.
 
 The extension handles configuration and UI synchronization through a loopback-only Agent Bridge while continuing to manage probe mutual exclusion. Every ELF read recomputes the content fingerprint and resolves symbols; sampling aborts when the ELF changes during a session to avoid reusing stale variable addresses.
+
+The extension starts the Bridge only when EmberProbe Agent Skills are installed in the current project, writing a temporary token-free pointer to `.agents/skills/_emberprobe/agent-bridge.json` beside the shared Skill runtime. It no longer creates a project-root `.emberprobe` directory. Globally installed Skills, opening the sidebar, and ordinary flash, debug, or live-watch features do not write the pointer. Uninstalling project-scoped Skills removes it together with the `_emberprobe` runtime directory.
 
 ## Development & Build
 

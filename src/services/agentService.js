@@ -38,6 +38,10 @@ class AgentService {
         return Object.keys(this.handlers);
     }
 
+    isStarted() {
+        return !!this.bridge;
+    }
+
     async call(method, params = {}) {
         if (method === "capabilities") {
             return { protocol: 1, methods: this.methods() };

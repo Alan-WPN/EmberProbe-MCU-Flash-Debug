@@ -16,7 +16,7 @@ const execFileAsync = promisify(execFile);
     const extensionManifest = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../package.json"), "utf8"));
     assert.ok(
         extensionManifest.activationEvents.includes("onStartupFinished"),
-        "global Agent Skills require the extension to start its bridge without a workspace-local activation file"
+        "workspace Agent Skills require startup detection before they can connect to the Bridge"
     );
     assert.deepStrictEqual(configSkill.parseSet("debugger=cmsis-dap.cfg,mcu=stm32f4x.cfg"), {
         debugger: "cmsis-dap.cfg", mcu: "stm32f4x.cfg"
@@ -133,12 +133,16 @@ const execFileAsync = promisify(execFile);
         };
     }, storageDir);
     try {
+        const obsoletePointer = path.join(root, ".emberprobe", "agent-bridge.json");
+        fs.mkdirSync(path.dirname(obsoletePointer), { recursive: true });
+        fs.writeFileSync(obsoletePointer, "{}");
         const descriptor = await bridge.start();
         assert.ok(descriptor.port > 0);
+        assert.ok(!fs.existsSync(path.join(root, ".emberprobe")), "starting the new Bridge must remove the empty legacy pointer directory");
         // 描述文件（含 token）必须落在用户目录而非工作区；工作区只留指针
         assert.deepStrictEqual(descriptor, JSON.parse(fs.readFileSync(bridge.descriptorPath, "utf8")));
         assert.ok(bridge.descriptorPath.startsWith(storageDir), "descriptor must live in the storage dir");
-        const pointer = JSON.parse(fs.readFileSync(path.join(root, ".emberprobe", "agent-bridge.json"), "utf8"));
+        const pointer = JSON.parse(fs.readFileSync(path.join(root, ".agents", "skills", "_emberprobe", "agent-bridge.json"), "utf8"));
         assert.strictEqual(pointer.descriptorPath, bridge.descriptorPath);
         assert.ok(!pointer.token, "workspace pointer must never contain the bridge token");
         const result = await call(root, "config.get", { test: true });
@@ -194,7 +198,7 @@ const execFileAsync = promisify(execFile);
         assert.strictEqual(failedTrend.operation, "variables.trend");
         assert.strictEqual(failedTrend.error.code, "TARGET_NOT_CONNECTED");
         assert.strictEqual(failedTrend.error.details.openocdTail[0], "Error: cannot read IDR");
-        assert.ok(fs.existsSync(path.join(root, ".emberprobe", "agent-bridge.json")));
+        assert.ok(fs.existsSync(path.join(root, ".agents", "skills", "_emberprobe", "agent-bridge.json")));
 
         // Bridge 侧 config.set 拒绝修改 openocdPath：该键可把探针调用引向任意可执行文件
         let forbidden;
@@ -260,7 +264,15 @@ const execFileAsync = promisify(execFile);
         // 停止 Bridge 后描述文件与工作区指针一并清理
         await bridge.stop();
         assert.ok(!fs.existsSync(bridge.descriptorPath), "descriptor must be removed on stop");
-        assert.ok(!fs.existsSync(path.join(root, ".emberprobe", "agent-bridge.json")), "pointer must be removed on stop");
+        assert.ok(!fs.existsSync(path.join(root, ".agents", "skills", "_emberprobe", "agent-bridge.json")), "pointer must be removed on stop");
+        assert.ok(!fs.existsSync(path.join(root, ".agents", "skills", "_emberprobe")), "empty bridge runtime directory must be removed on stop");
+
+        // 目录内存在用户文件时只删指针，不删用户内容或非空目录。
+        await bridge.start();
+        const keepFile = path.join(root, ".agents", "skills", "_emberprobe", "keep.txt");
+        fs.writeFileSync(keepFile, "keep");
+        await bridge.stop();
+        assert.strictEqual(fs.readFileSync(keepFile, "utf8"), "keep");
 
         // 旧格式兼容：工作区描述文件直接含 token（旧版扩展写入）时，agent-client 仍可原地读取
         const legacyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-bridge-legacy-"));

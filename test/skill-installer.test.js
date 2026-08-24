@@ -65,11 +65,14 @@ const { inspectSkill, installSkill, uninstallSkill, inspectSkills } = require(".
 
         // 项目范围卸载:只移除 manifest 内 skill 与共享运行时,保留用户自建 skill
         fs.mkdirSync(path.join(workspace, ".agents", "skills", "user-skill"), { recursive: true });
+        fs.mkdirSync(path.join(workspace, ".emberprobe"), { recursive: true });
+        fs.writeFileSync(path.join(workspace, ".emberprobe", "agent-bridge.json"), "{}");
         const uninstalled = await uninstallSkill(vscode, context, "en", "workspace");
         assert.strictEqual(uninstalled.scopes.workspace.state, "notInstalled");
         assert.ok(!fs.existsSync(path.join(workspace, ".agents", "skills", "_emberprobe")));
         assert.ok(!fs.existsSync(path.join(workspace, ".agents", "skills", "mcu-chip-info")));
         assert.ok(fs.existsSync(path.join(workspace, ".agents", "skills", "user-skill")), "user-created skills must be preserved");
+        assert.ok(!fs.existsSync(path.join(workspace, ".emberprobe")), "workspace uninstall must remove the Bridge pointer directory");
 
         // 全局卸载后目录已空,应整体移除 skills 目录
         const globalUninstall = await uninstallSkill(vscode, context, "en", "global");

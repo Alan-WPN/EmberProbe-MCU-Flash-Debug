@@ -1,7 +1,9 @@
 "use strict";
 // 解析 ELF 的 DWARF 调试信息，提取"变量名 → C 类型"映射，用于在导入列表中显示类型并推断默认观察类型。
-// 同时提供 parseCompositeLayout 提取结构体/联合/数组的内存布局（成员名、偏移、类型、数组维度）。
+// 同时提供复合类型（结构体/联合/数组）的内存布局解析（成员名、偏移、类型、数组维度）。
 // 独立实现，防御式：任何解析异常都优雅降级（返回已解析部分或空表），不影响基于符号表的导入。
+
+const elfFormat = require("./elfFormat");
 
 // —— LEB128 ——
 function readULEB(buf, cur) {
@@ -56,28 +58,25 @@ function cstr(buf, off) {
 }
 function readAddr(buf, cur, size) {
     const s = size || 4;
-    if (s === 8) { const v = buf.readUInt32LE(cur.p); cur.p += 8; return v; }
+    // 本解析器的 ELF 格式层只允许 ELF32；显式拒绝其他 DWARF 地址宽度，
+    // 防止未来放开 ELF64 头校验后静默截断 64 位地址。
+    if (s !== 4) throw new Error(`ELF32 DWARF address size must be 4, got ${s}`);
     const v = buf.readUIntLE(cur.p, s); cur.p += s; return v;
 }
 
-// 读取带名称的节表：name → { offset, size }
+// 读取带名称的节表：name → { offset, size }（无调试段或非法 ELF 时返回空 Map）
 function readSections(buf) {
     const map = new Map();
-    if (buf.length < 52 || buf[4] !== 1 || buf[5] !== 1) return map; // 仅 ELF32 LE
-    const eShoff = buf.readUInt32LE(32);
-    const eShentsize = buf.readUInt16LE(46) || 40;
-    const eShnum = buf.readUInt16LE(48);
-    const eShstrndx = buf.readUInt16LE(50);
-    if (!eShoff || !eShnum || eShstrndx >= eShnum) return map;
-    const shOff = (i) => eShoff + i * eShentsize;
-    const strOff = shOff(eShstrndx);
-    if (strOff + 40 > buf.length) return map;
-    const shstrBase = buf.readUInt32LE(strOff + 16);
-    for (let i = 0; i < eShnum; i++) {
-        const off = shOff(i);
-        if (off + 40 > buf.length) break;
-        const name = cstr(buf, shstrBase + buf.readUInt32LE(off + 0));
-        map.set(name, { offset: buf.readUInt32LE(off + 16), size: buf.readUInt32LE(off + 20) });
+    let header, entries;
+    try {
+        header = elfFormat.readElf32Header(buf);
+        entries = elfFormat.readSectionEntries(buf, header);
+    } catch (e) {
+        return map; // 非 ELF32/LE 或已 strip：按无 DWARF 处理
+    }
+    const names = elfFormat.readSectionNames(buf, entries, header.shstrndx);
+    for (let i = 0; i < entries.length; i++) {
+        map.set(names[i], { offset: entries[i].offset, size: entries[i].size });
     }
     return map;
 }
@@ -280,64 +279,29 @@ function _parseDwarfInternal(buffer) {
     return { dies, childrenMap, resolveStrx, variables };
 }
 
-// 主入口之一：返回 Map<变量名, { typeName, watchType }>
-function parseDwarfVariableTypes(buffer) {
-    try {
-        const parsed = _parseDwarfInternal(buffer);
-        if (!parsed) return new Map();
-        const { dies, variables } = parsed;
+// 模块级解析缓存：同一 Buffer 对象只完整解析一次，变量类型视图与复合布局视图共享结果。
+// 外层（extension.js）仍按 ELF SHA-256 缓存最终结果；两层缓存职责不同。
+const _parseCache = new WeakMap();
 
-        const resolveType = (refKey, depth) => {
-            if (depth > 16) return { typeName: '', watchType: '' };
-            const d = dies.get(refKey);
-            if (!d) return { typeName: '', watchType: '' };
-            const nm = d.name || '';
-            switch (d.tag) {
-                case DW_TAG_base_type:
-                    return { typeName: nm || 'base', watchType: encodingToWatchType(d.encoding, d.byteSize || 0) };
-                case DW_TAG_typedef: {
-                    const inner = d.typeRef !== undefined ? resolveType(d.typeRef, depth + 1) : { typeName: '', watchType: '' };
-                    return { typeName: nm || inner.typeName, watchType: inner.watchType };
-                }
-                case DW_TAG_const_type:
-                case DW_TAG_volatile_type:
-                case DW_TAG_restrict_type:
-                    return d.typeRef !== undefined ? resolveType(d.typeRef, depth + 1) : { typeName: '', watchType: '' };
-                case DW_TAG_pointer_type: {
-                    const inner = d.typeRef !== undefined ? resolveType(d.typeRef, depth + 1) : { typeName: 'void', watchType: '' };
-                    return { typeName: (inner.typeName || 'void') + ' *', watchType: 'u32' };
-                }
-                case DW_TAG_structure_type: return { typeName: nm ? 'struct ' + nm : 'struct', watchType: '' };
-                case DW_TAG_union_type: return { typeName: nm ? 'union ' + nm : 'union', watchType: '' };
-                case DW_TAG_enumeration_type: return { typeName: nm ? 'enum ' + nm : 'enum', watchType: encodingToWatchType(DW_ATE_signed, d.byteSize || 4) };
-                case DW_TAG_array_type: {
-                    const inner = d.typeRef !== undefined ? resolveType(d.typeRef, depth + 1) : { typeName: '', watchType: '' };
-                    return { typeName: (inner.typeName || '') + '[]', watchType: '' };
-                }
-                default: return { typeName: nm, watchType: '' };
-            }
-        };
-
-        const result = new Map();
-        for (const v of variables) {
-            const name = v.name || '';
-            if (!name || result.has(name)) continue;
-            const t = v.typeRef !== undefined ? resolveType(v.typeRef, 0) : { typeName: '', watchType: '' };
-            result.set(name, { typeName: t.typeName || '', watchType: t.watchType || '' });
-        }
-        return result;
-    } catch (e) {
-        return new Map(); // 任意异常一律降级为空表
+function _parseDwarfCached(buffer) {
+    const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+    let parsed = _parseCache.get(buf);
+    if (parsed === undefined) {
+        parsed = _parseDwarfInternal(buf);
+        _parseCache.set(buf, parsed);
     }
+    return parsed;
 }
 
-// —— 复合类型内存布局解析 ——
-
-// 解析任意类型 DIE 的基础信息（含复合类型标记）
+// 统一类型解析器：一次实现同时服务"变量类型视图"（typeName/watchType）与
+// "复合布局视图"（kind/byteSize）。此前两套近似实现极易改漏一处，现以变量类型
+// 视图的展示语义为准（指针显示为 "T *"、数组显示为 "T []"）。
+// 返回 { kind, typeName, watchType, byteSize }；kind ∈ scalar/struct/union/array/unknown。
+// cache 先写入 placeholder 防循环引用（C 中 struct A { struct A *next; } 一类自引用类型）。
 function _resolveTypeInfo(refKey, dies, cache) {
     if (cache.has(refKey)) return cache.get(refKey);
     const placeholder = { kind: 'unknown', typeName: '', watchType: '', byteSize: 0 };
-    cache.set(refKey, placeholder); // 防循环
+    cache.set(refKey, placeholder);
     const d = dies.get(refKey);
     if (!d) return placeholder;
     const nm = d.name || '';
@@ -347,7 +311,7 @@ function _resolveTypeInfo(refKey, dies, cache) {
             result = { kind: 'scalar', typeName: nm || 'base', watchType: encodingToWatchType(d.encoding, d.byteSize || 0), byteSize: d.byteSize || 0 };
             break;
         case DW_TAG_typedef: {
-            const inner = d.typeRef !== undefined ? _resolveTypeInfo(d.typeRef, dies, cache) : { kind: 'unknown', typeName: '', watchType: '', byteSize: 0 };
+            const inner = d.typeRef !== undefined ? _resolveTypeInfo(d.typeRef, dies, cache) : placeholder;
             result = { kind: inner.kind, typeName: nm || inner.typeName, watchType: inner.watchType, byteSize: d.byteSize || inner.byteSize };
             break;
         }
@@ -357,27 +321,46 @@ function _resolveTypeInfo(refKey, dies, cache) {
             result = d.typeRef !== undefined ? _resolveTypeInfo(d.typeRef, dies, cache) : placeholder;
             break;
         case DW_TAG_pointer_type: {
-            result = { kind: 'scalar', typeName: 'pointer', watchType: 'u32', byteSize: 4 };
+            const inner = d.typeRef !== undefined ? _resolveTypeInfo(d.typeRef, dies, cache) : { typeName: 'void' };
+            result = { kind: 'scalar', typeName: (inner.typeName || 'void') + ' *', watchType: 'u32', byteSize: 4 };
             break;
         }
         case DW_TAG_enumeration_type:
             result = { kind: 'scalar', typeName: nm ? 'enum ' + nm : 'enum', watchType: encodingToWatchType(DW_ATE_signed, d.byteSize || 4), byteSize: d.byteSize || 4 };
             break;
         case DW_TAG_structure_type:
-            result = { kind: 'struct', typeName: nm ? 'struct ' + nm : 'struct', watchType: '', byteSize: d.byteSize || 0, members: [] };
+            result = { kind: 'struct', typeName: nm ? 'struct ' + nm : 'struct', watchType: '', byteSize: d.byteSize || 0 };
             break;
         case DW_TAG_union_type:
-            result = { kind: 'union', typeName: nm ? 'union ' + nm : 'union', watchType: '', byteSize: d.byteSize || 0, members: [] };
+            result = { kind: 'union', typeName: nm ? 'union ' + nm : 'union', watchType: '', byteSize: d.byteSize || 0 };
             break;
-        case DW_TAG_array_type:
-            result = { kind: 'array', typeName: '', watchType: '', byteSize: d.byteSize || 0, elementType: null, dimensions: [], totalElements: 0 };
+        case DW_TAG_array_type: {
+            const inner = d.typeRef !== undefined ? _resolveTypeInfo(d.typeRef, dies, cache) : placeholder;
+            result = { kind: 'array', typeName: (inner.typeName || '') + '[]', watchType: '', byteSize: d.byteSize || 0 };
             break;
+        }
         default:
             result = { kind: 'unknown', typeName: nm, watchType: '', byteSize: d.byteSize || 0 };
     }
     cache.set(refKey, result);
     return result;
 }
+
+// 视图一：变量名 → { typeName, watchType }（共享 typeCache，同类型只解析一次）
+function buildVariableTypes(parsed) {
+    const { dies, variables } = parsed;
+    const typeCache = new Map();
+    const result = new Map();
+    for (const v of variables) {
+        const name = v.name || '';
+        if (!name || result.has(name)) continue;
+        const t = v.typeRef !== undefined ? _resolveTypeInfo(v.typeRef, dies, typeCache) : null;
+        result.set(name, { typeName: (t && t.typeName) || '', watchType: (t && t.watchType) || '' });
+    }
+    return result;
+}
+
+// —— 复合类型内存布局解析 ——
 
 // 收集 struct/union 的成员列表
 function _collectMembers(typeDieOff, dies, childrenMap, typeCache, depth) {
@@ -475,34 +458,62 @@ function _buildCompositeLayout(typeRef, dies, childrenMap, typeCache, depth) {
     return null;
 }
 
+// 视图二：变量名 → CompositeLayout（结构体/联合/数组的内存布局：
+// 成员名、偏移、类型、数组维度等）
+function buildCompositeLayouts(parsed) {
+    const { dies, childrenMap, variables } = parsed;
+    const typeCache = new Map();
+    const result = new Map();
+    for (const v of variables) {
+        const name = v.name || '';
+        if (!name || result.has(name)) continue;
+        if (v.typeRef === undefined) continue;
+        const typeInfo = _resolveTypeInfo(v.typeRef, dies, typeCache);
+        if (typeInfo.kind !== 'struct' && typeInfo.kind !== 'union' && typeInfo.kind !== 'array') continue;
+        const layout = _buildCompositeLayout(v.typeRef, dies, childrenMap, typeCache, 0);
+        if (layout) {
+            // 数组类型名补充：使用变量名关联的元素类型
+            if (layout.kind === 'array' && layout.elementType) {
+                layout.typeName = (layout.elementType.typeName || '') + '[]';
+            }
+            result.set(name, layout);
+        }
+    }
+    return result;
+}
+
+// 主入口之一：返回 Map<变量名, { typeName, watchType }>
+function parseDwarfVariableTypes(buffer) {
+    try {
+        const parsed = _parseDwarfCached(buffer);
+        return parsed ? buildVariableTypes(parsed) : new Map();
+    } catch (e) {
+        return new Map(); // 任意异常一律降级为空表
+    }
+}
+
 // 主入口之二：返回 Map<变量名, CompositeLayout>
-// CompositeLayout 描述结构体/联合/数组的内存布局（成员名、偏移、类型、数组维度等）。
 function parseCompositeLayout(buffer) {
     try {
-        const parsed = _parseDwarfInternal(buffer);
-        if (!parsed) return new Map();
-        const { dies, childrenMap, variables } = parsed;
-        const typeCache = new Map();
-        const result = new Map();
-        for (const v of variables) {
-            const name = v.name || '';
-            if (!name || result.has(name)) continue;
-            if (v.typeRef === undefined) continue;
-            const typeInfo = _resolveTypeInfo(v.typeRef, dies, typeCache);
-            if (typeInfo.kind !== 'struct' && typeInfo.kind !== 'union' && typeInfo.kind !== 'array') continue;
-            const layout = _buildCompositeLayout(v.typeRef, dies, childrenMap, typeCache, 0);
-            if (layout) {
-                // 数组类型名补充：使用变量名关联的元素类型
-                if (layout.kind === 'array' && layout.elementType) {
-                    layout.typeName = (layout.elementType.typeName || '') + '[]';
-                }
-                result.set(name, layout);
-            }
-        }
-        return result;
+        const parsed = _parseDwarfCached(buffer);
+        return parsed ? buildCompositeLayouts(parsed) : new Map();
     } catch (e) {
         return new Map();
     }
 }
 
-module.exports = { parseDwarfVariableTypes, parseCompositeLayout, encodingToWatchType, readULEB, readSLEB };
+// 聚合入口：一次完整解析同时产出两个视图。ELF 每次读取只应调用本入口；
+// 独立入口保留给旧调用方与单视图场景，内部经同一缓存不会重复解析。
+function parseDwarf(buffer) {
+    try {
+        // 先统一为一个 Buffer 对象，避免 Uint8Array 输入在两个视图入口各包装一次。
+        const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+        const parsed = _parseDwarfCached(buf);
+        if (!parsed) return { types: new Map(), layouts: new Map() };
+        return { types: buildVariableTypes(parsed), layouts: buildCompositeLayouts(parsed) };
+    } catch (e) {
+        return { types: new Map(), layouts: new Map() };
+    }
+}
+
+module.exports = { parseDwarf, parseDwarfVariableTypes, parseCompositeLayout, encodingToWatchType, readULEB, readSLEB };

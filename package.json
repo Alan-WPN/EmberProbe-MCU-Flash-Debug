@@ -126,6 +126,8 @@
   },
   "files": [
     "dist/extension.js",
+    "dist/webview/**/*",
+    "src/webview/**/*",
     "resources/**/*.tar.gz",
     "media/**/*",
     "skills/**/*",

@@ -7,6 +7,17 @@ const modernView = require("../src/modernView");
 const liveWatchView = require("../src/liveWatchView");
 const { externalizeWebviewHtml } = require("../src/webviewAssets");
 
+for (const file of [
+    "../src/webview/sidebar/app.css",
+    "../src/webview/sidebar/renderer.js",
+    "../src/webview/liveWatch/app.css",
+    "../src/webview/liveWatch/renderer.js"
+]) {
+    assert.ok(fs.statSync(path.resolve(__dirname, file)).size > 100, `${file} must be a real webview asset`);
+}
+assert.ok(!fs.readFileSync(require.resolve("../src/modernView"), "utf8").includes("const WRITE_INTERVAL_MS=100"));
+assert.ok(!fs.readFileSync(require.resolve("../src/liveWatchView"), "utf8").includes("requestAnimationFrame(loop)"));
+
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-webview-assets-"));
 try {
     const assetRootUri = { scheme: "file", fsPath: temp, path: "/global-storage/webview-assets" };

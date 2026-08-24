@@ -7,6 +7,12 @@ const { ConfigurationStore, assertAgentSettable } = require("../src/services/con
 const { FlashService } = require("../src/services/flashService");
 const { FaultService } = require("../src/services/faultService");
 const { AgentService } = require("../src/services/agentService");
+const { ElfService } = require("../src/services/elfService");
+const { OpenOcdStatusService } = require("../src/services/openocdStatusService");
+const { SkillStatusService, hasWorkspaceSkills } = require("../src/services/skillStatusService");
+const { ChipInfoService } = require("../src/services/chipInfoService");
+const { LiveWatchService } = require("../src/services/liveWatchService");
+const { AgentOrchestrator } = require("../src/services/agentOrchestrator");
 
 (async () => {
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-services-"));
@@ -129,6 +135,7 @@ const { AgentService } = require("../src/services/agentService");
                 "chip.read": async () => ({ core: "Cortex-M4", pc: "0x1", secret: "hidden" })
             }
         });
+        assert.strictEqual(agent.isStarted(), false, "constructing the service must not create/start a bridge");
         assert.deepStrictEqual(await agent.call("config.get"), { ok: true });
         assert.deepStrictEqual(await agent.call("chip.read", { sections: ["runtime"] }), { pc: "0x1" });
         const capabilities = await agent.call("capabilities");
@@ -140,9 +147,206 @@ const { AgentService } = require("../src/services/agentService");
         // onCall 钩子在每次调用前触发（capabilities 除外），供扩展侧做安全检查
         assert.deepStrictEqual(bridgeCalls, ["config.get", "chip.read"]);
         assert.deepStrictEqual(await agent.start(), { workspace: temp, storageDir: path.join(temp, "global-storage") });
+        assert.strictEqual(agent.isStarted(), true);
         const bridge = agent.bridge;
         await agent.stop();
         assert.strictEqual(bridge.stopped, true);
+        assert.strictEqual(agent.isStarted(), false);
+
+        let dwarfParses = 0;
+        const elfService = new ElfService({
+            context: { workspaceState: { get: () => elf } },
+            cacheKey: "elf",
+            fs,
+            crypto: require("crypto"),
+            cleanPath: (value) => value,
+            t: (key) => key,
+            elfSymbols: {
+                parseElfSymbols: () => ({ symbols: [{ name: "counter", size: 4 }], warnings: [] }),
+                defaultType: () => "u32"
+            },
+            dwarf: {
+                parseDwarf: () => {
+                    dwarfParses++;
+                    return {
+                        types: new Map([["counter", { typeName: "unsigned int", watchType: "u32" }]]),
+                        layouts: new Map()
+                    };
+                }
+            }
+        });
+        const firstElf = elfService.read();
+        assert.strictEqual(firstElf.symbols[0].hasDwarfWriteType, true);
+        assert.strictEqual(elfService.read(), firstElf, "matching content hash should reuse the enriched result");
+        assert.strictEqual(dwarfParses, 1);
+        elfService.invalidate();
+        elfService.read();
+        assert.strictEqual(dwarfParses, 2);
+
+        const statusEvents = [];
+        const checker = {
+            probeOpenOcd: async (target) => ({ found: true, path: target, requested: target, version: "1.0" }),
+            setCache(result) {
+                this.cached = result;
+            },
+            getCachedResult() {
+                return this.cached;
+            },
+            resolveOpenOcdStatus: async (_target, _context, result, report) => {
+                report({ state: "ready", result });
+                return result.path;
+            }
+        };
+        const statusService = new OpenOcdStatusService({
+            vscode: {
+                workspace: { getConfiguration: () => ({ get: () => "openocd" }) },
+                commands: { executeCommand: () => {} }
+            },
+            context,
+            checker,
+            getLang: () => "en",
+            onStatus: (status) => statusEvents.push(status)
+        });
+        assert.strictEqual(await statusService.refresh(), "openocd");
+        assert.strictEqual(await statusService.resolve("openocd"), "openocd");
+        assert.ok(statusEvents.some((event) => event.state === "ready"));
+        checker.installBundledAndConfigure = async () => "/bundled/openocd";
+        checker.pickOpenOcdPath = async () => "/picked/openocd";
+        assert.strictEqual(await statusService.handleAction("install"), "/bundled/openocd");
+        assert.strictEqual(await statusService.handleAction("select"), "/picked/openocd");
+        checker.cached = { found: true, path: "old", requested: "old" };
+        assert.strictEqual(await statusService.resolve("new-openocd"), "new-openocd");
+
+        const skillEvents = [];
+        const skillStatus = {
+            state: "installed",
+            scopes: { workspace: null, global: { state: "installed", installed: 2, total: 2, root: temp } }
+        };
+        const skillService = new SkillStatusService({
+            vscode: { window: {}, commands: {}, workspace: { workspaceFolders: [] } },
+            context,
+            installer: { inspectSkills: async () => skillStatus },
+            getLang: () => "en",
+            t: (key, params) => (params ? `${key}:${params.installed}/${params.total}` : key),
+            onStatus: (status) => skillEvents.push(status)
+        });
+        assert.strictEqual(await skillService.refresh(), skillStatus);
+        assert.strictEqual(skillService.scopeStateText(skillStatus.scopes.global), "skill.installed:2/2");
+        assert.deepStrictEqual(skillEvents, [skillStatus]);
+        assert.strictEqual(hasWorkspaceSkills(skillStatus), false, "global Skills must not enable a workspace Bridge");
+        assert.strictEqual(hasWorkspaceSkills({ scopes: { workspace: { state: "notInstalled" } } }), false);
+        assert.strictEqual(hasWorkspaceSkills({ scopes: { workspace: { state: "installed" } } }), true);
+        assert.strictEqual(hasWorkspaceSkills({ scopes: { workspace: { state: "partial" } } }), true);
+
+        const skillCalls = [];
+        const quickPicks = [{ id: "install:global" }, { id: "uninstall" }, { id: "global" }];
+        const notices = [];
+        const managedSkills = new SkillStatusService({
+            vscode: {
+                workspace: { workspaceFolders: [] },
+                commands: { executeCommand: (command) => skillCalls.push(command) },
+                window: {
+                    showQuickPick: async () => quickPicks.shift(),
+                    showWarningMessage: async (...args) => {
+                        notices.push(args);
+                        return args.at(-1);
+                    },
+                    showInformationMessage: async (...args) => {
+                        notices.push(args);
+                        return args.at(-1);
+                    }
+                }
+            },
+            context,
+            installer: {
+                inspectSkills: async () => skillStatus,
+                installSkill: async (_vscode, _context, _lang, scope) => {
+                    skillCalls.push(`install:${scope}`);
+                    return skillStatus;
+                },
+                uninstallSkill: async (_vscode, _context, _lang, scope) => {
+                    skillCalls.push(`uninstall:${scope}`);
+                    return skillStatus;
+                }
+            },
+            getLang: () => "en",
+            t: (key) => key,
+            onStatus: () => {}
+        });
+        assert.strictEqual(await managedSkills.manage(), skillStatus);
+        assert.strictEqual(await managedSkills.manage(), skillStatus);
+        assert.ok(skillCalls.includes("install:global") && skillCalls.includes("uninstall:global"));
+        managedSkills.lastStatus = { state: "modified" };
+        managedSkills.warnIfModified();
+        managedSkills.promptUpgrade({ state: "outdated" });
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.ok(notices.length >= 3);
+        assert.ok(skillCalls.includes("mcu-vscode.manageAgentSkills"));
+
+        const liveService = new LiveWatchService({
+            decodeValue: (bytes, type) => `${type}:${bytes[0]}`,
+            decodeComposite: () => ({ kind: "struct" })
+        });
+        const decoded = liveService.decodeSamples(
+            [
+                { name: "counter", bytes: [7] },
+                { name: "sensor", bytes: [1, 2] }
+            ],
+            123,
+            { graph: new Map([["counter", "u32"]]), sidebar: new Map([["counter", "i32"]]) },
+            new Map([["sensor", { layout: { kind: "struct" } }]])
+        );
+        assert.strictEqual(decoded.graphSamples[0].value, "u32:7");
+        assert.strictEqual(decoded.sidebarSamples[0].value, "i32:7");
+        assert.strictEqual(decoded.compositeSamples[0].tree.kind, "struct");
+
+        const active = new Set();
+        const chipPosts = [];
+        const chipService = new ChipInfoService({
+            vscode: { workspace: { getConfiguration: () => ({ get: () => "openocd" }) } },
+            context: { workspaceState: { get: (key) => (key === "debugger" ? "p.cfg" : "t.cfg") } },
+            cacheKeys: { debugger: "debugger", mcuCore: "target" },
+            chipInfo: { readChipInfo: async () => ({ core: "Cortex-M4" }) },
+            coordinator: {
+                isActive: (name) => active.has(name),
+                setActive: (name, value) => (value ? active.add(name) : active.delete(name))
+            },
+            t: (key) => key,
+            resolveExecutable: async (value) => value,
+            commandContext: () => ({ cwd: temp }),
+            onPost: (message) => chipPosts.push(message),
+            onDiagnostics: () => {},
+            isDebugActive: () => false
+        });
+        assert.deepStrictEqual(await chipService.read(), { core: "Cortex-M4" });
+        assert.strictEqual(chipService.running, false);
+        assert.ok(chipPosts.some((message) => message.type === "chipInfo"));
+        active.add("download");
+        assert.strictEqual(await chipService.read(), null);
+        assert.ok(chipPosts.some((message) => message.key === "chip.busyDownload"));
+        active.delete("download");
+
+        const unavailableChip = new ChipInfoService({
+            vscode: { workspace: { getConfiguration: () => ({ get: () => "openocd" }) } },
+            context: { workspaceState: { get: () => "configured.cfg" } },
+            cacheKeys: { debugger: "debugger", mcuCore: "target" },
+            chipInfo: { readChipInfo: async () => ({}) },
+            coordinator: {
+                isActive: () => false,
+                setActive: () => {}
+            },
+            t: (key) => key,
+            resolveExecutable: async () => null,
+            commandContext: () => ({ cwd: temp }),
+            onPost: () => {},
+            onDiagnostics: () => {},
+            isDebugActive: () => false
+        });
+        await assert.rejects(
+            () => unavailableChip.read(true),
+            (error) => error.code === "OPENOCD_NOT_READY"
+        );
+        assert.ok(new AgentOrchestrator({ Bridge: FakeBridge, handlers: {} }) instanceof AgentService);
 
         console.log("Service boundary tests passed");
     } finally {

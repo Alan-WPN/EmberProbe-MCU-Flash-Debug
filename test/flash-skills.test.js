@@ -49,7 +49,7 @@ function lastJsonLine(stdout) {
             mcu: "geehy/apm32f4x.cfg",
             openocdPath: fakeOpenOcd
         };
-    }, path.join(root, ".emberprobe", "storage"));
+    }, path.join(root, ".global-storage"));
 
     const run = (script, extra = []) => execFileAsync(process.execPath, [
         path.resolve(__dirname, "../skills", script), "--workspace", root, ...extra

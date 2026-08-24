@@ -3,7 +3,7 @@
 const esbuild = require("esbuild");
 const path = require("path");
 
-esbuild.build({
+const extensionBuild = esbuild.build({
     absWorkingDir: __dirname,
     entryPoints: [path.join(__dirname, "src", "extension.js")],
     bundle: true,
@@ -15,7 +15,27 @@ esbuild.build({
     minify: false,
     sourcemap: false,
     legalComments: "eof"
-}).catch((error) => {
+});
+
+function webviewBuild(area) {
+    return esbuild.build({
+        absWorkingDir: __dirname,
+        entryPoints: [
+            path.join(__dirname, "src", "webview", area, "renderer.js"),
+            path.join(__dirname, "src", "webview", area, "app.css")
+        ],
+        bundle: true,
+        outdir: path.join(__dirname, "dist", "webview", area),
+        platform: "browser",
+        format: "iife",
+        target: "es2020",
+        minify: false,
+        sourcemap: false,
+        legalComments: "none"
+    });
+}
+
+Promise.all([extensionBuild, webviewBuild("sidebar"), webviewBuild("liveWatch")]).catch((error) => {
     console.error(error);
     process.exit(1);
 });

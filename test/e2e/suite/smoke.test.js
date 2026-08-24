@@ -1,5 +1,7 @@
 "use strict";
 const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
 const vscode = require("vscode");
 
 async function run() {
@@ -7,6 +9,12 @@ async function run() {
     assert.ok(extension, "EmberProbe extension should be installed in the development host");
     await extension.activate();
     assert.strictEqual(extension.isActive, true);
+    const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    assert.ok(workspace, "E2E workspace should be available");
+    assert.ok(
+        !fs.existsSync(path.join(workspace, ".emberprobe")),
+        "activation alone must not create a workspace .emberprobe directory"
+    );
 
     const commands = new Set(await vscode.commands.getCommands(true));
     for (const command of [
@@ -27,8 +35,16 @@ async function run() {
 
     await vscode.commands.executeCommand("workbench.view.extension.mcu-vscode-container");
     await new Promise(resolve => setTimeout(resolve, 300));
+    assert.ok(
+        !fs.existsSync(path.join(workspace, ".emberprobe")),
+        "opening the EmberProbe view without workspace Skills must not create .emberprobe"
+    );
     await vscode.commands.executeCommand("mcu-vscode.openLiveWatch");
     await new Promise(resolve => setTimeout(resolve, 300));
+    assert.ok(
+        !fs.existsSync(path.join(workspace, ".emberprobe")),
+        "ordinary EmberProbe commands without workspace Skills must not create .emberprobe"
+    );
     await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
     console.log("✓ renders secured sidebar and live-watch Webviews");
 }

@@ -31,7 +31,7 @@ EmberProbe 是一款面向 Cortex-M 开发的 VS Code 扩展。它基于 OpenOCD
 ## Agent Skills
 
 - `mcu-download`：检测并下载最新 ELF，预检和执行结果包含 ELF SHA-256 指纹。
-- `mcu-live-watch`：只单次读取或分析趋势。临时趋势采样的启动、进度与关闭会同步到侧边栏和图表。安装该 Skill 的工作区会自动激活 Agent Bridge。也可添加变量到侧边栏、图表或两者。
+- `mcu-live-watch`：只单次读取或分析趋势。临时趋势采样的启动、进度与关闭会同步到侧边栏和图表。也可添加变量到侧边栏、图表或两者。
 - `mcu-chip-info`：按 `identity`、`debug`、`runtime` 分组或指定字段读取芯片信息。
 - `mcu-config`：读取或修改 ELF、调试器、MCU、SVD、OpenOCD 和采样参数。
 - `mcu-var-write`：按变量名安全写入标量或复合变量叶子成员，使用两阶段确认、ELF 指纹绑定和写后回读校验。
@@ -40,6 +40,8 @@ EmberProbe 是一款面向 Cortex-M 开发的 VS Code 扩展。它基于 OpenOCD
 - `mcu-flash-verify`：读取目标 Flash 并与当前 ELF 的可加载内容进行校验。
 
 扩展通过只监听本机的 Agent Bridge 处理配置和界面联动，并继续统一管理探针互斥。ELF 每次读取都会重新计算内容指纹和解析符号；采样期间 ELF 改变时会中止，避免继续使用旧变量地址。
+
+只有当前项目安装了 EmberProbe Agent Skills 时，扩展才会启动 Bridge，并在项目 Skills 共享运行时目录的 `.agents/skills/_emberprobe/agent-bridge.json` 写入一个不含令牌的临时指针。项目根目录不再创建 `.emberprobe`；全局安装 Skills、打开侧边栏以及使用烧录、调试、实时变量等普通功能也不会写入该指针。卸载项目级 Skills 时，指针会随 `_emberprobe` 运行时目录一起删除。
 
 ## 开发与构建
 

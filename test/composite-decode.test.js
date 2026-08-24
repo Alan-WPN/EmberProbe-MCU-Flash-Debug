@@ -131,6 +131,16 @@ assert.deepStrictEqual(
     ).map(l => [l.path, l.address, l.type]),
     [["sensors[1].y", 0x20000410, "f32"]]
 );
+// 范围/全选后继续访问复合元素成员缺少可供导航的单一布局，历史行为是不输出。
+// 这是 P1.4 删除空循环分支的行为锁，防止未来误生成错误地址。
+assert.deepStrictEqual(
+    expandCompositeLeaves(
+        { name: "sensors", address: 0x20000400, size: 24 },
+        sensorArrayLayout,
+        parseMemberPath("sensors[0:2].y")
+    ),
+    []
+);
 
 // 字节不足时标量解码为 null（不抛异常）
 const shortTree = decodeComposite([0xff, 0xff], sensorLayout);

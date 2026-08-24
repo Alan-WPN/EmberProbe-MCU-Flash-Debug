@@ -26,7 +26,8 @@ class AgentBridge {
         this.handler = handler;
         this.server = null;
         this.token = crypto.randomBytes(24).toString("hex");
-        this.pointerPath = path.join(this.workspace, ".emberprobe", "agent-bridge.json");
+        this.pointerPath = path.join(this.workspace, ".agents", "skills", "_emberprobe", "agent-bridge.json");
+        this.legacyPointerPath = path.join(this.workspace, ".emberprobe", "agent-bridge.json");
         if (storageDir) {
             const workspaceKey = crypto.createHash("sha256").update(this.workspace).digest("hex").slice(0, 16);
             this.descriptorPath = path.join(storageDir, `agent-bridge-${workspaceKey}.json`);
@@ -49,6 +50,9 @@ class AgentBridge {
             await fs.mkdir(path.dirname(this.pointerPath), { recursive: true });
             await fs.writeFile(this.pointerPath, JSON.stringify({ protocol: 1, descriptorPath: this.descriptorPath }, null, 2));
         }
+        // 升级迁移：移除旧版项目根指针，并仅在旧目录已经为空时删除目录。
+        await fs.unlink(this.legacyPointerPath).catch(() => {});
+        await fs.rmdir(path.dirname(this.legacyPointerPath)).catch(() => {});
         return descriptor;
     }
 
@@ -115,8 +119,14 @@ class AgentBridge {
                 if (this.pointerPath !== this.descriptorPath) {
                     try {
                         const pointer = JSON.parse(await fs.readFile(this.pointerPath, "utf8"));
-                        if (pointer.descriptorPath === this.descriptorPath) await fs.unlink(this.pointerPath);
+                        if (pointer.descriptorPath === this.descriptorPath) {
+                            await fs.unlink(this.pointerPath);
+                            // 只删除已经为空的插件目录；若用户在其中放了其他文件，rmdir 会失败并安全保留。
+                            await fs.rmdir(path.dirname(this.pointerPath)).catch(() => {});
+                        }
                     } catch { /* pointer may already be gone */ }
+                } else {
+                    await fs.rmdir(path.dirname(this.pointerPath)).catch(() => {});
                 }
             }
         } catch { /* descriptor may already be gone */ }
