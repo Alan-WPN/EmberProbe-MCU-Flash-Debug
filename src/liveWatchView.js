@@ -6,7 +6,10 @@ const liveWatchRenderer = loadWebviewAsset("liveWatch", "renderer.js");
 // 独立实时变量面板：无外部依赖，使用高 DPI Canvas 绘制曲线。
 // 采样序列 → RFC 4180 CSV：time 列（ISO 8601 UTC）+ 每变量一列，行尾 CRLF，带 UTF-8 BOM；
 // 各序列按采样时间戳对齐（同一 tick 共享同一时刻），晚加入的序列起始前留空单元格
-function buildCsv(names, buffers) {
+function buildCsv(names, buffers, opts) {
+    opts = opts || {};
+    const from = Number.isFinite(opts.from) ? opts.from : -Infinity;
+    const to = Number.isFinite(opts.to) ? opts.to : Infinity;
     function esc(value) {
         const text = String(value);
         return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
@@ -17,13 +20,15 @@ function buildCsv(names, buffers) {
     buffers.forEach((arr, seriesIndex) => {
         for (const point of arr) {
             if (!point) continue;
-            let cells = cellsByTime.get(point.t);
+            const time = Number(point.t);
+            if (!Number.isFinite(time) || time < from || time > to) continue;
+            let cells = cellsByTime.get(time);
             if (!cells) {
                 cells = new Array(names.length).fill('');
-                cellsByTime.set(point.t, cells);
-                times.push(point.t);
+                cellsByTime.set(time, cells);
+                times.push(time);
             }
-            cells[seriesIndex] = esc(point.v);
+            cells[seriesIndex] = esc(point.valueText !== null && point.valueText !== undefined ? point.valueText : point.v);
         }
     });
     times.sort((a, b) => a - b);
@@ -34,7 +39,8 @@ function getLiveWatchContent(cfg, lang) {
     const raw = cfg || {};
     const conf = {
         maxSamples: Math.min(20000, Math.max(100, Number(raw.maxSamples) || 2000)),
-        intervalMs: Math.min(10000, Math.max(20, Number(raw.intervalMs) || 100))
+        intervalMs: Math.min(10000, Math.max(20, Number(raw.intervalMs) || 100)),
+        panelId: Math.max(1, Math.floor(Number(raw.panelId) || 1))
     };
     const L = normalizeLang(lang), tr = (k, p) => t(L, k, p), i18nJson = jsonForScript(STRINGS);
     return `<!doctype html><html lang="${L==='zh'?'zh-CN':'en'}"><head><meta charset="UTF-8">
@@ -48,7 +54,8 @@ ${liveWatchCss}
 <div class="group"><label><span data-i18n="lw.window">${tr('lw.window')}</span> <select id="timeWindow"><option value="10" data-i18n="lw.sec10">${tr('lw.sec10')}</option><option value="30" selected data-i18n="lw.sec30">${tr('lw.sec30')}</option><option value="60" data-i18n="lw.sec60">${tr('lw.sec60')}</option><option value="0" data-i18n="lw.all">${tr('lw.all')}</option></select></label><button id="freeze" class="ghost">${tr('lw.freeze')}</button><button id="norm" class="ghost" data-i18n="lw.normalize" data-i18n-title="lw.normalized" title="${tr('lw.normalized')}">${tr('lw.normalize')}</button><button id="clear" class="ghost" data-i18n="lw.clear">${tr('lw.clear')}</button><button id="export" class="ghost" data-i18n="lw.exportCsv" data-i18n-title="lw.exportCsvTitle" title="${tr('lw.exportCsvTitle')}">${tr('lw.exportCsv')}</button></div>
 </div></div><main class="layout" id="layout"><aside class="side"><div class="side-head"><strong data-i18n="lw.currentValues">${tr('lw.currentValues')}</strong><span class="badge" id="count">0</span><span id="rate">0 Hz</span></div><div class="var-list" id="vars"><div class="empty" data-i18n="lw.varListEmpty">${tr('lw.varListEmpty')}</div></div></aside><div class="side-splitter" id="sideSplitter" data-i18n-title="lw.splitterHint" title="${tr('lw.splitterHint')}"></div><section class="chart-pane"><div class="chart-head"><strong data-i18n="lw.history">${tr('lw.history')}</strong><span id="range">—</span><span class="spacer"></span><span id="points">${tr('lw.points',{n:0})}</span></div><div class="chart-wrap" id="chartWrap"><canvas id="chart"></canvas><div class="chart-empty" id="chartEmpty" data-i18n="lw.chartEmpty">${tr('lw.chartEmpty')}</div></div></section></main>
 <div class="overlay hidden" id="overlay"><div class="panel"><h3 data-i18n="lw.importTitle">${tr('lw.importTitle')}</h3><div class="filter-wrap"><input id="impFilter" data-i18n-ph="lw.filterVars" placeholder="${tr('lw.filterVars')}"><button class="filter-clear" id="impFilterClear" type="button" data-i18n-title="lw.clearFilter" title="${tr('lw.clearFilter')}" aria-label="${tr('lw.clearFilter')}">×</button></div><div class="warn" id="impWarn"></div><div class="imp-meta" id="impCount"></div><div class="imp-list" id="impList"></div><div class="right"><button class="secondary" id="impCancel" data-i18n="lw.cancel">${tr('lw.cancel')}</button><button id="impAdd" data-i18n="lw.importSelected">${tr('lw.importSelected')}</button></div></div></div>
-<script>window.__CFG__=${jsonForScript(conf)};window.__LANG__=${jsonForScript(L)};window.__I18N__=${i18nJson};</script><script>
+<div class="overlay hidden" id="exportOverlay"><div class="panel export-panel"><h3 data-i18n="lw.exportTitle">${tr('lw.exportTitle')}</h3><div class="export-label" data-i18n="lw.exportSeries">${tr('lw.exportSeries')}</div><div class="export-series" id="exportSeries"></div><div class="export-label" data-i18n="lw.exportRange">${tr('lw.exportRange')}</div><div class="export-ranges" id="exportRanges"><label><input type="radio" name="exportRange" value="all" checked> <span data-i18n="lw.exportAll">${tr('lw.exportAll')}</span></label><label><input type="radio" name="exportRange" value="10"> <span data-i18n="lw.exportRecent10">${tr('lw.exportRecent10')}</span></label><label><input type="radio" name="exportRange" value="30"> <span data-i18n="lw.exportRecent30">${tr('lw.exportRecent30')}</span></label><label><input type="radio" name="exportRange" value="60"> <span data-i18n="lw.exportRecent60">${tr('lw.exportRecent60')}</span></label><label><input type="radio" name="exportRange" value="custom"> <span data-i18n="lw.exportCustom">${tr('lw.exportCustom')}</span></label></div><div class="export-custom disabled" id="exportCustom"><div class="export-timeline-title" data-i18n="lw.exportTimeline">${tr('lw.exportTimeline')}</div><div class="export-axis-labels"><span id="exportAxisStart">00:00</span><span id="exportAxisEnd">00:00</span></div><div class="export-timeline"><div class="export-range-fill" id="exportRangeFill"></div><input type="range" id="exportFromRange" min="0" max="1" value="0" aria-label="${tr('lw.exportFrom')}" disabled><input type="range" id="exportToRange" min="0" max="1" value="1" aria-label="${tr('lw.exportTo')}" disabled></div><div class="export-selection" id="exportSelection"></div></div><div class="warn" id="exportWarn"></div><div class="right"><button class="secondary" id="exportCancel" data-i18n="lw.cancel">${tr('lw.cancel')}</button><button id="exportApply" data-i18n="lw.exportSave">${tr('lw.exportSave')}</button></div></div></div>
+<script>window.__CFG__=${jsonForScript(conf)};window.__LANG__=${jsonForScript(L)};window.__I18N__=${i18nJson};window.__BUILD_CSV__=${buildCsv.toString()};</script><script>
 ${liveWatchRenderer}
 </script></body></html>`;
 }

@@ -47,9 +47,9 @@ assert.deepStrictEqual(yLeaf, [{ name: "sensor", path: "sensor.y", address: 0x20
 const sensorTree = decodeComposite(sensorBytes, sensorLayout);
 assert.strictEqual(sensorTree.kind, "struct");
 assert.strictEqual(sensorTree.members.length, 3);
-assert.deepStrictEqual(sensorTree.members[0], { name: "x", offset: 0, value: -1, type: "i32", typeName: "int" });
-assert.deepStrictEqual(sensorTree.members[1], { name: "y", offset: 4, value: 110, type: "f32", typeName: "float" });
-assert.deepStrictEqual(sensorTree.members[2], { name: "flags", offset: 8, value: 0x1234, type: "u16", typeName: "unsigned short" });
+assert.deepStrictEqual(sensorTree.members[0], { name: "x", offset: 0, value: -1, valueText: null, type: "i32", typeName: "int" });
+assert.deepStrictEqual(sensorTree.members[1], { name: "y", offset: 4, value: 110, valueText: null, type: "f32", typeName: "float" });
+assert.deepStrictEqual(sensorTree.members[2], { name: "flags", offset: 8, value: 0x1234, valueText: null, type: "u16", typeName: "unsigned short" });
 
 // —— navigateCompositeTree + isScalarLeafNode ——
 assert.strictEqual(navigateCompositeTree(sensorTree, null), sensorTree, "无路径返回整棵树");
@@ -145,6 +145,17 @@ assert.deepStrictEqual(
 // 字节不足时标量解码为 null（不抛异常）
 const shortTree = decodeComposite([0xff, 0xff], sensorLayout);
 assert.strictEqual(shortTree.members[0].value, null);
+
+const wideLayout = { kind: "struct", typeName: "struct Wide", byteSize: 16, members: [
+    { name: "count", offset: 0, byteSize: 8, watchType: "u64", typeName: "unsigned long long" },
+    { name: "delta", offset: 8, byteSize: 8, watchType: "i64", typeName: "long long" }
+] };
+const wideBytes = Buffer.alloc(16);
+wideBytes.writeBigUInt64LE(18446744073709551615n, 0);
+wideBytes.writeBigInt64LE(-9223372036854775808n, 8);
+const wideTree = decodeComposite(wideBytes, wideLayout);
+assert.strictEqual(wideTree.members[0].valueText, "18446744073709551615");
+assert.strictEqual(wideTree.members[1].valueText, "-9223372036854775808");
 
 // —— 技能脚本 variableSpecs：路径语法不被 ':' 误拆为类型 ——
 const liveSkill = require("../skills/mcu-live-watch/scripts/read-live");

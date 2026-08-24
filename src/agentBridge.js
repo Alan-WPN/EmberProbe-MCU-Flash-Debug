@@ -7,6 +7,18 @@ const path = require("path");
 const MAX_BODY = 64 * 1024;
 const ERROR_FIELDS = ['category', 'stage', 'likelyCause', 'retryable', 'suggestedActions', 'details', 'i18nKey', 'i18nParams'];
 
+function jsonReplacer(_key, value) {
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+        if (Number.isNaN(value)) return 'NaN';
+        return value > 0 ? 'Infinity' : '-Infinity';
+    }
+    return value;
+}
+
+function stringifyJson(value, space) {
+    return JSON.stringify(value, jsonReplacer, space);
+}
+
 function serializeError(error) {
     const result = {
         code: error?.code || "BRIDGE_ERROR",
@@ -45,10 +57,10 @@ class AgentBridge {
         });
         const descriptor = this.descriptor();
         await fs.mkdir(path.dirname(this.descriptorPath), { recursive: true });
-        await fs.writeFile(this.descriptorPath, JSON.stringify(descriptor, null, 2), { mode: 0o600 });
+        await fs.writeFile(this.descriptorPath, stringifyJson(descriptor, 2), { mode: 0o600 });
         if (this.pointerPath !== this.descriptorPath) {
             await fs.mkdir(path.dirname(this.pointerPath), { recursive: true });
-            await fs.writeFile(this.pointerPath, JSON.stringify({ protocol: 1, descriptorPath: this.descriptorPath }, null, 2));
+            await fs.writeFile(this.pointerPath, stringifyJson({ protocol: 1, descriptorPath: this.descriptorPath }, 2));
         }
         // 升级迁移：移除旧版项目根指针，并仅在旧目录已经为空时删除目录。
         await fs.unlink(this.legacyPointerPath).catch(() => {});
@@ -73,12 +85,12 @@ class AgentBridge {
         response.setHeader("Content-Type", "application/json; charset=utf-8");
         if (request.method !== "POST" || request.url !== "/v1/call") {
             response.statusCode = 404;
-            response.end(JSON.stringify({ ok: false, error: { code: "NOT_FOUND", message: "Unknown endpoint" } }));
+            response.end(stringifyJson({ ok: false, error: { code: "NOT_FOUND", message: "Unknown endpoint" } }));
             return;
         }
         if (request.headers.authorization !== `Bearer ${this.token}`) {
             response.statusCode = 401;
-            response.end(JSON.stringify({ ok: false, error: { code: "UNAUTHORIZED", message: "Invalid Agent Bridge token" } }));
+            response.end(stringifyJson({ ok: false, error: { code: "UNAUTHORIZED", message: "Invalid Agent Bridge token" } }));
             return;
         }
         let size = 0;
@@ -96,10 +108,10 @@ class AgentBridge {
                     throw Object.assign(new Error("Invalid method"), { code: "INVALID_METHOD" });
                 }
                 const result = await this.handler(payload.method, payload.params || {});
-                response.end(JSON.stringify({ ok: true, result }));
+                response.end(stringifyJson({ ok: true, result }));
             } catch (error) {
                 response.statusCode = Number(error.statusCode) || 400;
-                response.end(JSON.stringify({
+                response.end(stringifyJson({
                     ok: false,
                     error: serializeError(error)
                 }));
@@ -133,4 +145,4 @@ class AgentBridge {
     }
 }
 
-module.exports = { AgentBridge, MAX_BODY, serializeError };
+module.exports = { AgentBridge, MAX_BODY, serializeError, jsonReplacer, stringifyJson };

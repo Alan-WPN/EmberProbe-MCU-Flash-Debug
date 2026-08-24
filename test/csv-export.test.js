@@ -15,4 +15,18 @@ assert.strictEqual(lines[2], "2026-01-02T03:04:05.778Z,2,-0.5", "rows should ali
 assert.ok(csv.endsWith("\r\n"), "file should end with CRLF");
 assert.strictEqual(buildCsv(["a"], [[]]), "\uFEFFtime,a\r\n", "empty buffers should produce only the header");
 
+const ranged = buildCsv(["wide", "state"], [
+    [{ t: t0, v: Number(18446744073709551615n), valueText: "18446744073709551615" }, { t: t0 + 1000, v: NaN, valueText: "NaN" }],
+    [{ t: t0 + 500, v: 7 }, { t: t0 + 1000, v: Infinity, valueText: "Infinity" }]
+], { from: t0 + 500, to: t0 + 1000 });
+const rangedLines = ranged.split("\r\n");
+assert.strictEqual(rangedLines[1], "2026-01-02T03:04:06.178Z,,7", "from endpoint should be included");
+assert.strictEqual(rangedLines[2], "2026-01-02T03:04:06.678Z,NaN,Infinity", "to endpoint and exact text should be included");
+assert.strictEqual(
+    buildCsv(["wide"], [[{ t: t0, v: 1, valueText: "18446744073709551615" }]]).split("\r\n")[1],
+    "2026-01-02T03:04:05.678Z,18446744073709551615",
+    "valueText should take precedence over approximate values"
+);
+assert.strictEqual(buildCsv(["a"], [[{ t: t0, v: 1 }]], { from: t0 + 1, to: t0 + 2 }), "\uFEFFtime,a\r\n", "empty ranges should contain only the header");
+
 console.log("CSV export tests passed");

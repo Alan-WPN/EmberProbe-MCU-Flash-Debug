@@ -1,6 +1,6 @@
 "use strict";
 const assert = require("assert");
-const { parseElfSymbols, decodeValue, typeByteLength, resolveVariableRequests } = require("../src/elfSymbols");
+const { parseElfSymbols, decodeValue, decodeValueText, encodeValue, typeByteLength, resolveVariableRequests } = require("../src/elfSymbols");
 const { parseMemoryValues } = require("../src/liveWatch");
 const { encodingToWatchType, readULEB, readSLEB, parseDwarfVariableTypes } = require("../src/dwarf");
 const liveSkill = require("../skills/mcu-live-watch/scripts/read-live");
@@ -64,7 +64,7 @@ assert.strictEqual(symbols[0].name, "myGlobal");
 assert.strictEqual(symbols[0].address, 0x20000010);
 assert.strictEqual(symbols[0].size, 4);
 assert.deepStrictEqual(liveSkill.parseSymbolsBuffer(buildElf()), [{ name: "myGlobal", address: 0x20000010, size: 4 }]);
-assert.strictEqual(liveSkill.infer(8), "", "large aggregate-like symbols must not be guessed as u32");
+assert.strictEqual(liveSkill.infer(8), "u64", "8-byte symbols should default to u64");
 
 // decodeValue：各类型小端解码
 assert.strictEqual(decodeValue([0xff], "u8"), 255);
@@ -75,6 +75,13 @@ assert.strictEqual(decodeValue([0xff, 0xff, 0xff, 0xff], "i32"), -1);
 assert.strictEqual(decodeValue([0x78, 0x56, 0x34, 0x12], "u32"), 0x12345678);
 assert.strictEqual(decodeValue([0x01], "u32"), null, "字节不足应返回 null");
 assert.strictEqual(typeByteLength("f32"), 4);
+assert.strictEqual(typeByteLength("u64"), 8);
+assert.strictEqual(decodeValueText(encodeValue("18446744073709551615", "u64"), "u64"), "18446744073709551615");
+assert.strictEqual(decodeValue(encodeValue("-9223372036854775808", "i64"), "i64"), Number(-9223372036854775808n));
+assert.strictEqual(decodeValueText(encodeValue("-9223372036854775808", "i64"), "i64"), "-9223372036854775808");
+assert.strictEqual(decodeValue(encodeValue(1.25, "f64"), "f64"), 1.25);
+assert.strictEqual(decodeValueText(encodeValue("nan", "f64"), "f64"), "NaN");
+assert.strictEqual(liveSkill.decodeText([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff], "u64"), "18446744073709551615");
 const resolvedRequests = resolveVariableRequests([
     { name: "Tick", address: 0x20000000, size: 4, watchType: "u32", isComposite: false },
     { name: "sinx", address: 0x20000004, size: 4, watchType: "f32", isComposite: false }
@@ -108,7 +115,9 @@ assert.throws(() => liveSkill.parseSymbolsBuffer(malformedElf), /section table i
 
 // DWARF：基础类型编码 → 观察类型
 assert.strictEqual(encodingToWatchType(0x04, 4), "f32"); // float
-assert.strictEqual(encodingToWatchType(0x04, 8), "");    // double 不支持
+assert.strictEqual(encodingToWatchType(0x04, 8), "f64"); // double
+assert.strictEqual(encodingToWatchType(0x05, 8), "i64");
+assert.strictEqual(encodingToWatchType(0x07, 8), "u64");
 assert.strictEqual(encodingToWatchType(0x05, 2), "i16"); // signed
 assert.strictEqual(encodingToWatchType(0x07, 4), "u32"); // unsigned
 assert.strictEqual(encodingToWatchType(0x08, 1), "u8");  // unsigned char

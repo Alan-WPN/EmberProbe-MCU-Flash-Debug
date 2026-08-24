@@ -106,6 +106,15 @@ assert.ok(panel.includes('id="timeWindow"'));
 assert.ok(panel.includes('id="freeze"'));
 assert.ok(panel.includes('id="export"') && panel.includes("type:'exportCsv'"), "chart toolbar should offer CSV export through the extension");
 assert.ok(panel.includes('function buildCsv'), "panel should embed the shared CSV builder");
+assert.ok(panel.includes('window.__BUILD_CSV__=function buildCsv') && panel.includes('var buildCsv=window.__BUILD_CSV__'), "the webview should execute the shared CSV builder");
+assert.ok(panel.includes('id="exportOverlay"') && panel.includes('id="exportSeries"') && panel.includes('name="exportRange"'), "CSV export should offer series and time-range selection");
+assert.ok(panel.includes('id="exportFromRange"') && panel.includes('id="exportToRange"') && panel.includes('id="exportRangeFill"'), "custom CSV ranges should use a dual-handle timeline");
+assert.ok(!panel.includes('type="datetime-local"'), "custom CSV ranges should no longer use datetime text fields");
+assert.ok(panel.includes('exportOpenedAt=Date.now()') && panel.includes("exportAxisStart').textContent='00:00'"), "the export timeline should end at dialog-open time and start at 00:00");
+assert.ok(panel.includes('class="export-custom disabled"') && panel.includes("classList.toggle('disabled',!enabled)"), "the export timeline should remain visible but disabled outside custom mode");
+assert.ok(panel.includes('.export-timeline:before') && panel.includes('repeating-linear-gradient(90deg') && panel.includes('height:26px'), "the export timeline should use a long editing-track style with time ticks");
+assert.ok(panel.includes('width:10px;height:34px') && panel.includes('border-radius:2px'), "timeline trim handles should be tall rectangular controls");
+assert.ok(panel.includes("m.type==='exportCsvResult'") && panel.includes("seriesCount:selected.length,rowCount:rows"), "CSV export should report saved series and row counts");
 assert.ok(panel.includes("lw.noDataToExport"), "exporting without data should hint instead of writing a file");
 assert.ok(panel.includes('html,body{width:100%;height:100%;overflow:hidden}'), "panel should fit its webview without page scrolling");
 assert.ok(panel.includes('card.append(rm,sw,main,sel)'), "remove button should be the first control in each variable card");
@@ -150,6 +159,7 @@ assert.ok(providerSource.includes("_scalarWatchList"), "persisted aggregate watc
 assert.ok(providerSource.includes("new AgentOrchestrator") && agentServiceSource.includes("new this.Bridge"), "provider should expose the authenticated local Agent Bridge through AgentOrchestrator");
 assert.ok(providerSource.includes("'config.set':"), "Agent Bridge should support synchronized configuration changes");
 assert.ok(providerSource.includes("'watch.add':"), "Agent Bridge should add variables to the sidebar or chart");
+assert.ok(providerSource.includes("'variables.exportCsv':") && providerSource.includes("case 'agentExportCsvResult'"), "Agent Bridge should export the selected chart's real history buffer");
 assert.ok(providerSource.includes("'variables.read':"), "Agent Bridge should support one-shot variable reads");
 assert.ok(providerSource.includes("'variables.sample':"), "Agent Bridge should support autonomous trend sampling");
 assert.ok(providerSource.includes("source = 'temporary-probe'"), "one-shot reads should start a temporary probe when sampling is off");
@@ -158,6 +168,13 @@ assert.ok(providerSource.includes("if (this._agentReadRunning) this.stopAgentRea
 assert.ok(providerSource.includes("this._agentReadDelayResolve"), "Agent sampling interval should be cancellable without waiting for the full delay");
 assert.ok(panel.includes('"maxSamples":100'), "maxSamples should be clamped");
 assert.ok(panel.includes('"intervalMs":20'), "interval should be clamped");
+const panelTwo = liveWatchView.getLiveWatchContent({ maxSamples: 2000, intervalMs: 100, panelId: 2 });
+assert.ok(panelTwo.includes('"panelId":2') && panelTwo.includes('m.panelId=CFG.panelId'), "panel identity should be injected into every upstream message");
+assert.ok(providerSource.includes("this._livePanels = new Map()") && providerSource.includes("nextLivePanelId(this._livePanels)"), "provider should manage multiple stable live-panel slots");
+assert.ok(providerSource.includes("types.graphs.get(entry.watchKey)") && providerSource.includes("entry.latestSamples"), "samples should be decoded and cached per panel");
+assert.ok(providerSource.includes("type: 'liveInterval'") && panel.includes("m.type==='liveInterval'"), "sampling interval changes should be broadcast globally");
+assert.ok(panel.includes("m.type==='agentExportCsv'") && panel.includes("type:'agentExportCsvResult'"), "the chart webview should serve Agent CSV requests from its own buffer");
+assert.ok(providerSource.includes("previousText:") && providerSource.includes("writtenText:") && providerSource.includes("readBackText:"), "write results should expose exact decoded text for every stage");
 
 // 连接失效必须一次性停止采样并拒绝整个 FIFO，避免迟到响应串到下一个请求。
 let disconnects = 0;

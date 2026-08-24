@@ -32,13 +32,13 @@ node <skill-dir>/scripts/write-var.js --workspace <workspace> --set kp=0.5 --con
 node <skill-dir>/scripts/write-var.js --workspace <workspace> --reset-permission
 ```
 
-- `--set` takes `name=value` pairs separated by commas. Values may be integers or decimals; the type (`u8/i8/u16/i16/u32/i32/f32`) is inferred from the ELF's DWARF info and range-checked.
+- `--set` takes `name=value` pairs separated by commas. Values are passed as text so exact 64-bit decimal integers are preserved. The type (`u8/i8/u16/i16/u32/i32/f32/u64/i64/f64`) is inferred from the ELF's DWARF info and range-checked.
 - Only scalar variables and single scalar leaves of structs/arrays (`sensor.x`, `buf[0]`) are supported. Whole structs or array ranges cannot be written (`UNSUPPORTED_VARIABLE`).
 - If live sampling is active, EmberProbe reuses that connection; otherwise it starts a temporary probe session, writes once, and releases it.
 
 ## Result
 
-Before authorization, the script prints a confirmation JSON object and performs no write. After authorization, `results` contains per-variable `previous`, `written`, `readBack`, and `verified`; `permission.mode` is `once` or `workspace`. Report the previous → written transition for each variable. `verified: true` means the value was read back byte-identical right after the write.
+Before authorization, the script prints a confirmation JSON object and performs no write. After authorization, `results` contains per-variable `previous`, `written`, `readBack`, and `verified`; 64-bit exact values are in `previousText`, `writtenText`, and `readBackText`. `permission.mode` is `once` or `workspace`. Prefer the text fields when present and report the previous → written transition for each variable. `verified: true` means the value was read back byte-identical right after the write.
 
 `WRITE_VERIFY_FAILED` usually means the firmware immediately overwrote the variable (e.g. it is recomputed every loop); explain that to the user instead of retrying blindly.
 

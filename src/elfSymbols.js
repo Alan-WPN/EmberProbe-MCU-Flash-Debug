@@ -4,14 +4,15 @@
 
 const elfFormat = require("./elfFormat");
 
-const SUPPORTED_TYPES = ['u8', 'i8', 'u16', 'i16', 'u32', 'i32', 'f32'];
+const SUPPORTED_TYPES = ['u8', 'i8', 'u16', 'i16', 'u32', 'i32', 'f32', 'u64', 'i64', 'f64'];
 
-// 各标量类型的字节宽度（不支持 64 位，与 MCUViewer 1.1.0 一致）
+// 各标量类型的字节宽度
 function typeByteLength(type) {
     switch (type) {
         case 'u8': case 'i8': return 1;
         case 'u16': case 'i16': return 2;
         case 'u32': case 'i32': case 'f32': return 4;
+        case 'u64': case 'i64': case 'f64': return 8;
         default: return 4;
     }
 }
@@ -20,6 +21,7 @@ function typeByteLength(type) {
 function defaultType(size) {
     if (size === 1) return 'u8';
     if (size === 2) return 'u16';
+    if (size === 8) return 'u64';
     return 'u32';
 }
 
@@ -63,20 +65,47 @@ function resolveVariableRequests(symbols, requests) {
 // 将数值按类型编码为小端字节数组（与 decodeValue 对称），越界/非法值抛错
 function encodeValue(value, type) {
     if (!SUPPORTED_TYPES.includes(type)) throw Object.assign(new Error(`Unsupported type: ${type}`), { code: 'UNSUPPORTED_VARIABLE_TYPE' });
-    const number = Number(value);
-    if (!Number.isFinite(number)) throw Object.assign(new Error(`Value is not a finite number: ${value}`), { code: 'INVALID_WRITE_VALUE' });
+    const invalid = message => { throw Object.assign(new Error(message), { code: 'INVALID_WRITE_VALUE' }); };
+    const width = typeByteLength(type);
+    const view = new DataView(new ArrayBuffer(width));
+    if (type === 'u64' || type === 'i64') {
+        let integer;
+        if (typeof value === 'bigint') integer = value;
+        else if (typeof value === 'number') {
+            if (!Number.isSafeInteger(value)) invalid(`${type} requires a safe integer Number or an exact decimal string: ${value}`);
+            integer = BigInt(value);
+        } else if (typeof value === 'string' && /^[+-]?\d+$/.test(value.trim())) {
+            try { integer = BigInt(value.trim()); } catch { invalid(`Invalid decimal integer for ${type}: ${value}`); }
+        } else invalid(`${type} requires an integer value: ${value}`);
+        const min = type === 'u64' ? 0n : -(1n << 63n);
+        const max = type === 'u64' ? (1n << 64n) - 1n : (1n << 63n) - 1n;
+        if (integer < min || integer > max) invalid(`Value out of range for ${type}: ${value}`);
+        if (type === 'u64') view.setBigUint64(0, integer, true);
+        else view.setBigInt64(0, integer, true);
+        return Array.from(new Uint8Array(view.buffer));
+    }
+    let number;
+    if (type === 'f64' && typeof value === 'string') {
+        const alias = value.trim().toLowerCase();
+        if (alias === 'nan') number = NaN;
+        else if (alias === 'inf' || alias === '+inf') number = Infinity;
+        else if (alias === '-inf') number = -Infinity;
+        else number = Number(value);
+    } else number = Number(value);
+    if (type !== 'f64' && !Number.isFinite(number)) invalid(`Value is not a finite number: ${value}`);
+    if (type === 'f64' && typeof value === 'string' && !value.trim()) invalid(`Value is not a number: ${value}`);
+    if (type === 'f64' && Number.isNaN(number) && !(typeof value === 'number' && Number.isNaN(value))
+        && !(typeof value === 'string' && value.trim().toLowerCase() === 'nan')) invalid(`Value is not a number: ${value}`);
     const ranges = {
         u8: [0, 0xff], i8: [-128, 127],
         u16: [0, 0xffff], i16: [-32768, 32767],
         u32: [0, 0xffffffff], i32: [-2147483648, 2147483647]
     };
-    if (type !== 'f32') {
-        if (!Number.isInteger(number)) throw Object.assign(new Error(`${type} requires an integer value: ${value}`), { code: 'INVALID_WRITE_VALUE' });
+    if (type !== 'f32' && type !== 'f64') {
+        if (!Number.isInteger(number)) invalid(`${type} requires an integer value: ${value}`);
         const [min, max] = ranges[type];
-        if (number < min || number > max) throw Object.assign(new Error(`Value out of range for ${type}: ${value}`), { code: 'INVALID_WRITE_VALUE' });
+        if (number < min || number > max) invalid(`Value out of range for ${type}: ${value}`);
     }
-    const width = typeByteLength(type);
-    const view = new DataView(new ArrayBuffer(width));
     switch (type) {
         case 'u8': view.setUint8(0, number); break;
         case 'i8': view.setInt8(0, number); break;
@@ -85,6 +114,7 @@ function encodeValue(value, type) {
         case 'u32': view.setUint32(0, number, true); break;
         case 'i32': view.setInt32(0, number, true); break;
         case 'f32': view.setFloat32(0, number, true); break;
+        case 'f64': view.setFloat64(0, number, true); break;
     }
     return Array.from(new Uint8Array(view.buffer));
 }
@@ -99,6 +129,9 @@ function decodeScalarAt(view, offset, type) {
         case 'u32': return view.getUint32(offset, true);
         case 'i32': return view.getInt32(offset, true);
         case 'f32': return view.getFloat32(offset, true);
+        case 'u64': return Number(view.getBigUint64(offset, true));
+        case 'i64': return Number(view.getBigInt64(offset, true));
+        case 'f64': return view.getFloat64(offset, true);
         default: return null;
     }
 }
@@ -109,6 +142,22 @@ function decodeValue(bytes, type) {
     if (!bytes || bytes.length < need) return null;
     const view = new DataView(Uint8Array.from(bytes).buffer);
     return decodeScalarAt(view, 0, type);
+}
+
+// 64 位标量的精确/特殊文本表示；其他值返回 null。
+function decodeValueText(bytes, type) {
+    const need = typeByteLength(type);
+    if (!bytes || bytes.length < need) return null;
+    const view = new DataView(Uint8Array.from(bytes).buffer);
+    if (type === 'u64') return view.getBigUint64(0, true).toString(10);
+    if (type === 'i64') return view.getBigInt64(0, true).toString(10);
+    if (type === 'f64') {
+        const value = view.getFloat64(0, true);
+        if (Number.isNaN(value)) return 'NaN';
+        if (value === Infinity) return 'Infinity';
+        if (value === -Infinity) return '-Infinity';
+    }
+    return null;
 }
 
 // 解析 ELF32 符号表，返回 { symbols: [{name,address,size}], warnings: [] }
@@ -452,7 +501,9 @@ function decodeComposite(bytes, layout) {
                 if (m.compositeLayout) {
                     members.push({ name: m.name, ...decodeLayout(mOff, m.compositeLayout) });
                 } else if (m.watchType) {
-                    members.push({ name: m.name, offset: mOff, value: decodeScalar(mOff, m.watchType), type: m.watchType, typeName: m.typeName || '' });
+                    const width = typeByteLength(m.watchType);
+                    const raw = mOff >= 0 && mOff + width <= src.length ? src.subarray(mOff, mOff + width) : null;
+                    members.push({ name: m.name, offset: mOff, value: decodeScalar(mOff, m.watchType), valueText: decodeValueText(raw, m.watchType), type: m.watchType, typeName: m.typeName || '' });
                 }
             }
             return { kind: lyt.kind, typeName: lyt.typeName, byteSize: lyt.byteSize, offset, members };
@@ -468,7 +519,9 @@ function decodeComposite(bytes, layout) {
                     const decoded = decodeLayout(eOff, elemType.compositeLayout);
                     if (decoded) elements.push({ index: i, ...decoded });
                 } else if (elemType.watchType) {
-                    elements.push({ index: i, offset: eOff, value: decodeScalar(eOff, elemType.watchType), type: elemType.watchType });
+                    const width = typeByteLength(elemType.watchType);
+                    const raw = eOff >= 0 && eOff + width <= src.length ? src.subarray(eOff, eOff + width) : null;
+                    elements.push({ index: i, offset: eOff, value: decodeScalar(eOff, elemType.watchType), valueText: decodeValueText(raw, elemType.watchType), type: elemType.watchType });
                 }
             }
             return { kind: 'array', typeName: lyt.typeName, byteSize: lyt.byteSize, offset, elementType: elemType, dimensions: lyt.dimensions, elements };
@@ -517,4 +570,4 @@ function isScalarLeafNode(node) {
         && !Object.prototype.hasOwnProperty.call(node, 'elements');
 }
 
-module.exports = { parseElfSymbols, parseElfSections, nearestFunction, decodeValue, encodeValue, decodeComposite, navigateCompositeTree, isScalarLeafNode, defaultType, typeByteLength, resolveVariableRequests, parseMemberPath, expandCompositeLeaves, SUPPORTED_TYPES };
+module.exports = { parseElfSymbols, parseElfSections, nearestFunction, decodeValue, decodeValueText, encodeValue, decodeComposite, navigateCompositeTree, isScalarLeafNode, defaultType, typeByteLength, resolveVariableRequests, parseMemberPath, expandCompositeLeaves, SUPPORTED_TYPES };

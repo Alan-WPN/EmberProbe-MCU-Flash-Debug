@@ -1,51 +1,99 @@
 "use strict";
 
-// 采样回调的纯数据层：同一份原始字节按图表/侧边栏各自类型解码，
-// 并维护两个消费者的最新值。会话生命周期由 Provider 组装。
+// 将多个消费者的观察列表合并为单一原始字节读取计划。
+// 同名标量取最大宽度，复合变量按整体内存范围读取。
+function buildActiveReadPlan(watchLists, elfSymbols) {
+    const byName = new Map();
+    const add = (item) => {
+        if (!item?.name) return;
+        if (item.isComposite && item.compositeLayout) {
+            const sym = { name: item.name, address: item.address, size: item.size };
+            const leaves = elfSymbols.expandCompositeLeaves(sym, item.compositeLayout, null);
+            if (!leaves.length) return;
+            const totalSize =
+                Number(item.size) ||
+                leaves.reduce((max, leaf) => Math.max(max, leaf.address - (Number(item.address) >>> 0) + leaf.size), 0);
+            const prev = byName.get(item.name);
+            if (!prev || totalSize > prev.size || !prev.isComposite) {
+                byName.set(item.name, { name: item.name, address: item.address, size: totalSize, isComposite: true });
+            }
+            return;
+        }
+        const size = elfSymbols.typeByteLength(item.type);
+        const prev = byName.get(item.name);
+        if (!prev) byName.set(item.name, { name: item.name, address: item.address, size });
+        else if (!prev.isComposite && size > prev.size) prev.size = size;
+    };
+    for (const list of watchLists || []) for (const item of list || []) add(item);
+    return Array.from(byName.values());
+}
+
+function nextLivePanelId(entries) {
+    const used = entries instanceof Map ? entries : new Map((entries || []).map((id) => [Number(id), true]));
+    let id = 1;
+    while (used.has(id)) id++;
+    return id;
+}
+
+function selectFocusedPanel(entries) {
+    let focused = null;
+    const values = entries instanceof Map ? entries.values() : entries || [];
+    for (const entry of values) if (!focused || Number(entry.focusOrder) > Number(focused.focusOrder)) focused = entry;
+    return focused;
+}
+
+// 单消费者解码层：同一份原始字节可按每个面板自己的类型/复合布局分别解码。
 class LiveWatchService {
     constructor(elfSymbols) {
         this.elfSymbols = elfSymbols;
-        this.latestGraphSamples = new Map();
+        this.latestGraphSamples = new Map(); // 兼容旧调用；多面板缓存由 Provider 分别持有
         this.latestSidebarSamples = new Map();
     }
 
-    decodeSamples(samples, time, types, compositeMap) {
-        const graphSamples = [];
-        const sidebarSamples = [];
+    decodeConsumerSamples(samples, time, typeMap, compositeMap, latestSamples) {
+        const scalarSamples = [];
         const compositeSamples = [];
-        for (const sample of samples) {
-            const composite = compositeMap.get(sample.name);
-            if (composite && sample.bytes) {
-                const tree = this.elfSymbols.decodeComposite(sample.bytes, composite.layout);
+        const latest = latestSamples || new Map();
+        for (const sample of samples || []) {
+            const composite = compositeMap?.get(sample.name);
+            if (composite) {
+                const tree = sample.bytes ? this.elfSymbols.decodeComposite(sample.bytes, composite.layout) : null;
                 if (tree) {
                     const decoded = { name: sample.name, tree, t: time };
                     compositeSamples.push(decoded);
-                    this.latestSidebarSamples.set(sample.name, decoded);
+                    latest.set(sample.name, decoded);
                 }
                 continue;
             }
-            const graphType = types.graph.get(sample.name);
-            const sidebarType = types.sidebar.get(sample.name);
-            if (graphType) {
-                const decoded = {
-                    name: sample.name,
-                    value: sample.bytes ? this.elfSymbols.decodeValue(sample.bytes, graphType) : null,
-                    t: time
-                };
-                graphSamples.push(decoded);
-                this.latestGraphSamples.set(sample.name, decoded);
-            }
-            if (sidebarType) {
-                const decoded = {
-                    name: sample.name,
-                    value: sample.bytes ? this.elfSymbols.decodeValue(sample.bytes, sidebarType) : null,
-                    t: time
-                };
-                sidebarSamples.push(decoded);
-                this.latestSidebarSamples.set(sample.name, decoded);
-            }
+            const type = typeMap?.get(sample.name);
+            if (!type) continue;
+            const decoded = {
+                name: sample.name,
+                value: sample.bytes ? this.elfSymbols.decodeValue(sample.bytes, type) : null,
+                valueText: sample.bytes ? this.elfSymbols.decodeValueText(sample.bytes, type) : null,
+                t: time
+            };
+            scalarSamples.push(decoded);
+            latest.set(sample.name, decoded);
         }
-        return { graphSamples, sidebarSamples, compositeSamples };
+        return { scalarSamples, compositeSamples };
+    }
+
+    // 保留旧形状，供已有服务边界测试与扩展内部过渡使用。
+    decodeSamples(samples, time, types, compositeMap) {
+        const graph = this.decodeConsumerSamples(samples, time, types.graph, new Map(), this.latestGraphSamples);
+        const sidebar = this.decodeConsumerSamples(
+            samples,
+            time,
+            types.sidebar,
+            compositeMap,
+            this.latestSidebarSamples
+        );
+        return {
+            graphSamples: graph.scalarSamples,
+            sidebarSamples: sidebar.scalarSamples,
+            compositeSamples: sidebar.compositeSamples
+        };
     }
 
     prune(map, names) {
@@ -54,4 +102,4 @@ class LiveWatchService {
     }
 }
 
-module.exports = { LiveWatchService };
+module.exports = { LiveWatchService, buildActiveReadPlan, nextLivePanelId, selectFocusedPanel };

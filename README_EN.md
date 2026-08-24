@@ -11,7 +11,7 @@ EmberProbe is a VS Code extension for Cortex-M development. Built on OpenOCD, it
 - Detects the OpenOCD environment in the sidebar and shows its status; Windows x64 supports one-click offline installation, or you can point to an existing OpenOCD executable.
 - Linux/macOS have no bundled package: install OpenOCD with your system package manager (e.g. `sudo apt install openocd`, `brew install openocd`) and point "Select OpenOCD" at it; on Linux, USB probes additionally require udev rules or group membership (see the [OpenOCD udev rules](https://github.com/openocd-org/openocd/blob/master/contrib/60-openocd.rules)).
 - Chip info readout: non-intrusively reads the chip core, Device ID, Flash size, UID, debug link, and run state via OpenOCD.
-- Live variable watch: non-intrusively reads Cortex-M RAM while the target runs; the sidebar offers a standalone value list, and the chart panel provides a collapsible, draggable current-value column plus real-time curves.
+- Live variable watch: non-intrusively reads Cortex-M RAM while the target runs; the sidebar offers a standalone value list, and multiple chart panels can keep independent watch lists and history buffers.
 - Optionally installs eight Agent Skills covering firmware download and verification, live variable reads and writes, chip and fault inspection, ELF analysis, and configuration synchronization.
 
 ## Requirements
@@ -23,15 +23,17 @@ EmberProbe is a VS Code extension for Cortex-M development. Built on OpenOCD, it
 
 The sidebar lists all global/static variables of the current ELF; click a variable to add it to a standalone value list.
 
-- Type support: scalars prefer DWARF type info; structs, unions, and arrays can be expanded to select scalar leaves, and the chart can also import by array element or range; 64-bit scalars are not supported yet.
+- Type support: scalars prefer DWARF type info and support `u8/i8/u16/i16/u32/i32/f32/u64/i64/f64`; structs, unions, and arrays can be expanded to select scalar leaves.
+- 64-bit precision: `u64/i64` charts use approximate Number values outside ±2^53; the sidebar, CSV, and Agent results prefer the exact decimal `valueText`.
+- CSV export: select any buffered series, including hidden curves. The editing-style dual-handle timeline stays visible but disabled and gray outside Custom mode; Custom defaults to the full buffer and ends when the dialog is opened.
 - Live writes: the sidebar can add scalars with reliable DWARF types in ELF writable sections to a write list; writes are enabled only while sampling is active and are verified by reading the value back after each write.
-- Limits: supports only Cortex-M and global/static variables at fixed addresses; sampling bandwidth is limited (~10–50 Hz).
+- Limits: supports only Cortex-M and global/static variables at fixed addresses; sampling bandwidth is limited (~10–50 Hz). Multiple panels share sampling start/stop and interval state; memory use grows linearly with panel count, with `maxSamples` applied per panel.
 - Related settings: `emberprobe.tclPort`, `emberprobe.sampleIntervalMs`, `emberprobe.maxSamples`.
 
 ## Agent Skills
 
 - `mcu-download`: detects and downloads the newest ELF, reporting an ELF SHA-256 fingerprint during preflight and execution.
-- `mcu-live-watch`: reads once or analyzes trends. The startup, progress, and shutdown of temporary trend sampling are synchronized to the sidebar and chart. It can also add variables to the sidebar, chart, or both.
+- `mcu-live-watch`: reads once, analyzes trends, or reads/exports actual chart history CSV by panel, series, and time range. Temporary trend sampling is synchronized to the sidebar and charts. Chart additions target the most recently focused panel, or the persisted chart #1 list when no panel is open.
 - `mcu-chip-info`: reads chip info by the `identity`, `debug`, and `runtime` groups, or by specific fields.
 - `mcu-config`: reads or changes ELF, debugger, MCU, SVD, OpenOCD, and sampling parameters.
 - `mcu-var-write`: safely writes scalars or composite leaves by name with two-stage confirmation, ELF fingerprint binding, and read-back verification.
@@ -53,7 +55,7 @@ npm run test:e2e
 npm run package
 ```
 
-Run `npm run release:prepare -- <version> --date YYYY-MM-DD` when preparing a new version; the script synchronizes version metadata, the README, and the Changelog. Pushing the matching `vX.Y.Z` tag automatically creates a GitHub Release and uploads the VSIX; see [docs/RELEASING.md](docs/RELEASING.md) for publishing and retry instructions. See [test/hil/README.md](test/hil/README.md) for hardware-runner setup. The current extension version is `0.6.1`.
+Run `npm run release:prepare -- <version> --date YYYY-MM-DD` when preparing a new version; the script synchronizes version metadata, the README, and the Changelog. Pushing the matching `vX.Y.Z` tag automatically creates a GitHub Release and uploads the VSIX; see [docs/RELEASING.md](docs/RELEASING.md) for publishing and retry instructions. See [test/hil/README.md](test/hil/README.md) for hardware-runner setup. The current extension version is `0.6.3`.
 
 ## Project Structure
 

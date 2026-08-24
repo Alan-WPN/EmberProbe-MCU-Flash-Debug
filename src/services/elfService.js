@@ -61,7 +61,7 @@ class ElfService {
                 hasLayout ||
                 /^(struct|union)\b/.test(symbol.typeName) ||
                 /\[\]$/.test(symbol.typeName) ||
-                (!info?.watchType && symbol.size > 4);
+                (!info && ![1, 2, 4, 8].includes(Number(symbol.size)));
             symbol.watchType = symbol.isComposite ? "" : info?.watchType || this.elfSymbols.defaultType(symbol.size);
             symbol.hasDwarfWriteType = !symbol.isComposite && !!info?.watchType;
             if (symbol.isComposite) {

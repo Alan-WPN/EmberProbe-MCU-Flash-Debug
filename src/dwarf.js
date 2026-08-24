@@ -38,14 +38,14 @@ const DW_AT_name = 0x03, DW_AT_byte_size = 0x0b, DW_AT_encoding = 0x3e, DW_AT_ty
 const DW_ATE_boolean = 0x02, DW_ATE_float = 0x04, DW_ATE_signed = 0x05, DW_ATE_signed_char = 0x06,
     DW_ATE_unsigned = 0x07, DW_ATE_unsigned_char = 0x08;
 
-// 基础类型编码 + 字节宽度 → 观察类型（u8…f32）；不支持者返回 ''
+// 基础类型编码 + 字节宽度 → 观察类型；不支持者返回 ''
 function encodingToWatchType(encoding, size) {
-    if (encoding === DW_ATE_float) return size === 4 ? 'f32' : '';
+    if (encoding === DW_ATE_float) return size === 4 ? 'f32' : size === 8 ? 'f64' : '';
     if (encoding === DW_ATE_signed || encoding === DW_ATE_signed_char) {
-        if (size === 1) return 'i8'; if (size === 2) return 'i16'; if (size === 4) return 'i32'; return '';
+        if (size === 1) return 'i8'; if (size === 2) return 'i16'; if (size === 4) return 'i32'; if (size === 8) return 'i64'; return '';
     }
     if (encoding === DW_ATE_unsigned || encoding === DW_ATE_unsigned_char || encoding === DW_ATE_boolean) {
-        if (size === 1) return 'u8'; if (size === 2) return 'u16'; if (size === 4) return 'u32'; return '';
+        if (size === 1) return 'u8'; if (size === 2) return 'u16'; if (size === 4) return 'u32'; if (size === 8) return 'u64'; return '';
     }
     return '';
 }

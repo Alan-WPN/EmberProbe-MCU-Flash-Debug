@@ -11,7 +11,7 @@ EmberProbe 是一款面向 Cortex-M 开发的 VS Code 扩展。它基于 OpenOCD
 - 在侧边栏检测 OpenOCD 环境并展示其状态；Windows x64 支持一键离线安装，也可指向已有的 OpenOCD 可执行文件。
 - Linux/macOS 无预置包：请用系统包管理器安装（如 `sudo apt install openocd`、`brew install openocd`），再通过“选择 OpenOCD”指定路径；Linux 访问 USB 探针还需 udev 规则或相应用户组权限（详见 [OpenOCD udev 规则](https://github.com/openocd-org/openocd/blob/master/contrib/60-openocd.rules)）。
 - 芯片信息读取：通过 OpenOCD 非侵入式读取芯片内核、Device ID、Flash 容量、UID、调试链路与运行状态。
-- 实时变量观测：在目标运行时非侵入式读取 Cortex-M 内存；侧边栏提供独立数值列表，图表面板提供可折叠、可拖拽的当前值列与实时曲线。
+- 实时变量观测：在目标运行时非侵入式读取 Cortex-M 内存；侧边栏提供独立数值列表，可同时打开多个拥有独立观察列表和历史缓冲的实时图表面板。
 - 可选安装八个 Agent Skills，覆盖固件下载与校验、实时变量读写、芯片和故障信息读取、ELF 分析，以及配置同步。
 
 ## 环境要求
@@ -23,15 +23,17 @@ EmberProbe 是一款面向 Cortex-M 开发的 VS Code 扩展。它基于 OpenOCD
 
 侧边栏列出当前 ELF 的所有全局/静态变量；点击变量可将其加入独立数值列表。
 
-- 类型支持：标量优先使用 DWARF 类型信息；结构体、联合体和数组可展开并选择标量叶子成员，图表也可按数组元素或范围导入；64 位标量暂不支持。
+- 类型支持：标量优先使用 DWARF 类型信息，支持 `u8/i8/u16/i16/u32/i32/f32/u64/i64/f64`；结构体、联合体和数组可展开并选择标量叶子成员。
+- 64 位精度：`u64/i64` 图表在 ±2^53 外使用 Number 近似值；侧边栏、CSV 和 Agent 结果优先使用精确十进制 `valueText`。
+- CSV 导出：可选择包含已隐藏曲线在内的任意有数据系列；剪辑轨道式双端时间轴始终可见，非自定义模式时置灰，自定义模式默认全选且右端为打开导出对话框的时刻。
 - 实时写入：侧边栏可把具有可靠 DWARF 类型且位于 ELF 可写段的标量加入写入列表；写入只在采样会话运行时启用，并在每次写入后回读校验。
-- 限制：仅支持 Cortex-M 及固定地址的全局/静态变量；采样带宽有限（约 10–50 Hz）。
+- 限制：仅支持 Cortex-M 及固定地址的全局/静态变量；采样带宽有限（约 10–50 Hz）。多面板共享采样启停和间隔，内存占用随面板数线性增长，每个面板分别受 `maxSamples` 限制。
 - 相关设置：`emberprobe.tclPort`、`emberprobe.sampleIntervalMs`、`emberprobe.maxSamples`。
 
 ## Agent Skills
 
 - `mcu-download`：检测并下载最新 ELF，预检和执行结果包含 ELF SHA-256 指纹。
-- `mcu-live-watch`：只单次读取或分析趋势。临时趋势采样的启动、进度与关闭会同步到侧边栏和图表。也可添加变量到侧边栏、图表或两者。
+- `mcu-live-watch`：单次读取、分析趋势，或按面板/曲线/时间区间读取与导出真实图表历史 CSV。临时趋势采样的启动、进度与关闭会同步到侧边栏和图表。添加到图表时优先使用最近聚焦的面板，无已打开面板时保存到图表 #1。
 - `mcu-chip-info`：按 `identity`、`debug`、`runtime` 分组或指定字段读取芯片信息。
 - `mcu-config`：读取或修改 ELF、调试器、MCU、SVD、OpenOCD 和采样参数。
 - `mcu-var-write`：按变量名安全写入标量或复合变量叶子成员，使用两阶段确认、ELF 指纹绑定和写后回读校验。
@@ -53,7 +55,7 @@ npm run test:e2e
 npm run package
 ```
 
-准备新版本时运行 `npm run release:prepare -- <version> --date YYYY-MM-DD`，脚本会同步版本元数据、README 和 Changelog。推送匹配版本的 `vX.Y.Z` 标签后，Release 工作流会自动创建 GitHub Release 并上传 VSIX；发布及重试方式见 [docs/RELEASING.md](docs/RELEASING.md)。真机测试接入方式见 [test/hil/README.md](test/hil/README.md)。当前扩展版本为 `0.6.1`。
+准备新版本时运行 `npm run release:prepare -- <version> --date YYYY-MM-DD`，脚本会同步版本元数据、README 和 Changelog。推送匹配版本的 `vX.Y.Z` 标签后，Release 工作流会自动创建 GitHub Release 并上传 VSIX；发布及重试方式见 [docs/RELEASING.md](docs/RELEASING.md)。真机测试接入方式见 [test/hil/README.md](test/hil/README.md)。当前扩展版本为 `0.6.3`。
 
 ## 项目结构
 

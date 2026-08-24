@@ -5,8 +5,15 @@ const net = require("net");
 const crypto = require("crypto");
 const { call, writeDiagnostic } = require("../../_emberprobe/agent-client");
 
-const TYPES = new Set(["u8", "i8", "u16", "i16", "u32", "i32", "f32"]);
-const WIDTH = { u8: 1, i8: 1, u16: 2, i16: 2, u32: 4, i32: 4, f32: 4 };
+const TYPES = new Set(["u8", "i8", "u16", "i16", "u32", "i32", "f32", "u64", "i64", "f64"]);
+const WIDTH = { u8: 1, i8: 1, u16: 2, i16: 2, u32: 4, i32: 4, f32: 4, u64: 8, i64: 8, f64: 8 };
+
+function stringify(value) {
+  return JSON.stringify(value, (_key, item) => {
+    if (typeof item === "number" && !Number.isFinite(item)) return Number.isNaN(item) ? "NaN" : item > 0 ? "Infinity" : "-Infinity";
+    return item;
+  });
+}
 
 function args(argv) {
   const out = {};
@@ -14,7 +21,7 @@ function args(argv) {
     const key = argv[i];
     if (!key.startsWith("--")) throw new Error(`Unexpected argument: ${key}`);
     const name = key.slice(2);
-    if (name === "list" || name === "trend" || name === "read") out[name] = true;
+    if (name === "list" || name === "trend" || name === "read" || name === "export-csv") out[name] = true;
     else {
       const value = argv[++i];
       if (value === undefined || value.startsWith("--")) throw new Error(`Missing value for --${name}`);
@@ -31,6 +38,63 @@ function boundedInteger(value, fallback, min, max, name) {
     throw new Error(`${name} must be an integer from ${min} to ${max}`);
   }
   return parsed;
+}
+
+function parseTimestamp(value, name, now = Date.now()) {
+  if (value === undefined || value === "") return undefined;
+  const text = String(value).trim();
+  if (/^\d{12,}$/.test(text)) {
+    const epoch = Number(text);
+    if (Number.isFinite(epoch)) return epoch;
+  }
+  const clock = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(text);
+  if (clock) {
+    const hour = Number(clock[1]), minute = Number(clock[2]), second = Number(clock[3] || 0);
+    if (hour <= 23 && minute <= 59 && second <= 59) {
+      const result = new Date(now);
+      result.setHours(hour, minute, second, 0);
+      return result.getTime();
+    }
+  }
+  const parsed = Date.parse(text);
+  if (Number.isFinite(parsed)) return parsed;
+  throw new Error(`${name} must be epoch milliseconds, ISO time, or local HH:MM[:SS]`);
+}
+
+function exportRange(opt, now = Date.now()) {
+  const to = parseTimestamp(opt.to, "--to", now) ?? now;
+  let from = parseTimestamp(opt.from, "--from", now);
+  if (opt.last !== undefined) {
+    if (from !== undefined) throw new Error("--last cannot be combined with --from");
+    const seconds = Number(opt.last);
+    if (!Number.isFinite(seconds) || seconds <= 0) throw new Error("--last must be a positive number of seconds");
+    from = to - seconds * 1000;
+  }
+  if (from !== undefined && from > to) throw new Error("--from must not be later than --to");
+  return { from, to };
+}
+
+function exportRangeDetails(opt, range) {
+  const clockPattern = /^\d{1,2}:\d{2}(?::\d{2})?$/;
+  const offsetMinutes = -new Date(range.to).getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const absoluteOffset = Math.abs(offsetMinutes);
+  const offset = `${sign}${String(Math.floor(absoluteOffset / 60)).padStart(2, "0")}:${String(absoluteOffset % 60).padStart(2, "0")}`;
+  return {
+    input: {
+      from: opt.from ?? null,
+      to: opt.to ?? null,
+      lastSeconds: opt.last === undefined ? null : Number(opt.last)
+    },
+    resolvedUtc: {
+      from: range.from === undefined ? null : new Date(range.from).toISOString(),
+      to: new Date(range.to).toISOString()
+    },
+    localTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "system-local",
+    localUtcOffset: `UTC${offset}`,
+    bareClockUsesLocalTime: clockPattern.test(String(opt.from || "")) || clockPattern.test(String(opt.to || "")),
+    guidance: "Prefer --last for relative ranges or full ISO 8601 timestamps ending in Z for UTC. Bare HH:MM[:SS] is interpreted in the machine's local time zone."
+  };
 }
 
 function variableSpecs(value) {
@@ -127,7 +191,7 @@ function parseSymbols(file) {
   return { symbols: parseSymbolsBuffer(snapshot.buffer), snapshot };
 }
 
-function infer(size) { return size === 1 ? "u8" : size === 2 ? "u16" : size === 4 ? "u32" : ""; }
+function infer(size) { return size === 1 ? "u8" : size === 2 ? "u16" : size === 4 ? "u32" : size === 8 ? "u64" : ""; }
 function decode(values, type) {
   const buf = Buffer.from(values.slice(0, WIDTH[type]));
   if (buf.length < WIDTH[type]) return null;
@@ -137,7 +201,23 @@ function decode(values, type) {
   if (type === "i16") return buf.readInt16LE(0);
   if (type === "u32") return buf.readUInt32LE(0);
   if (type === "i32") return buf.readInt32LE(0);
-  return buf.readFloatLE(0);
+  if (type === "f32") return buf.readFloatLE(0);
+  if (type === "u64") return Number(buf.readBigUInt64LE(0));
+  if (type === "i64") return Number(buf.readBigInt64LE(0));
+  return buf.readDoubleLE(0);
+}
+function decodeText(values, type) {
+  const buf = Buffer.from(values.slice(0, WIDTH[type]));
+  if (buf.length < WIDTH[type]) return null;
+  if (type === "u64") return buf.readBigUInt64LE(0).toString(10);
+  if (type === "i64") return buf.readBigInt64LE(0).toString(10);
+  if (type === "f64") {
+    const value = buf.readDoubleLE(0);
+    if (Number.isNaN(value)) return "NaN";
+    if (value === Infinity) return "Infinity";
+    if (value === -Infinity) return "-Infinity";
+  }
+  return null;
 }
 function memoryValues(text) {
   return String(text).replace(/\x1a/g, " ").replace(/(^|\s)(0x)?[0-9a-f]+:/gi, " ").trim().split(/\s+/).flatMap(t => {
@@ -229,21 +309,61 @@ class Tcl {
 async function main() {
   const opt = args(process.argv.slice(2));
   const workspace = path.resolve(opt.workspace || process.cwd());
+  if (opt["export-csv"]) {
+    const variables = opt.variables ? variableSpecs(opt.variables).map(item => item.name) : [];
+    const range = exportRange(opt);
+    const params = { variables, to: range.to };
+    if (range.from !== undefined) params.from = range.from;
+    if (opt.panel !== undefined) params.panelId = boundedInteger(opt.panel, 1, 1, 1000, "--panel");
+    const rangeDetails = exportRangeDetails(opt, range);
+    let result;
+    try {
+      result = await call(workspace, "variables.exportCsv", params);
+    } catch (error) {
+      error.details = { ...(error.details || {}), requestedRange: rangeDetails };
+      if (rangeDetails.bareClockUsesLocalTime) {
+        error.likelyCause = `Bare HH:MM[:SS] was interpreted in ${rangeDetails.localTimeZone} (${rangeDetails.localUtcOffset}), while chart timestamps are UTC.`;
+        error.suggestedActions = [
+          "Retry with --last for a relative range, or pass full ISO 8601 UTC timestamps ending in Z.",
+          `Use details.requestedRange.resolvedUtc to verify the actual interval before retrying.`
+        ];
+      }
+      throw error;
+    }
+    if (opt.output) {
+      const output = path.resolve(workspace, opt.output);
+      fs.mkdirSync(path.dirname(output), { recursive: true });
+      fs.writeFileSync(output, String(result.csv || ""), "utf8");
+      const metadata = { ...result };
+      delete metadata.csv;
+      process.stdout.write(stringify({ type: "csvExport", ...metadata, requestedRange: rangeDetails, output }) + "\n");
+    } else {
+      process.stdout.write(stringify({ type: "csvExport", ...result, requestedRange: rangeDetails }) + "\n");
+    }
+    return;
+  }
+  let bridgeVariables = null;
+  if (!opt.list && !opt.elf && !opt.port && opt["add-to"]) {
+    bridgeVariables = variableSpecs(opt.variables);
+    const destination = opt["add-to"];
+    const types = Object.fromEntries(bridgeVariables.filter(item => item.type).map(item => [item.name, item.type]));
+    const added = await call(workspace, "watch.add", {
+      variables: bridgeVariables.map(item => item.name),
+      types,
+      destination
+    });
+    if (!opt.read && !opt.trend && opt.count === undefined) {
+      process.stdout.write(stringify({ type: "watchUpdate", destination, ...added }) + "\n");
+      return;
+    }
+  }
   // 趋势读取同样走扩展桥：已有采样时复用连接；未采样时由扩展临时启动
   // OpenOCD，并把启动、进度和关闭状态同步到侧边栏。只输出汇总，减少 Agent token。
   if (opt.trend && !opt.elf && !opt.port) {
-    const variables = variableSpecs(opt.variables);
+    const variables = bridgeVariables || variableSpecs(opt.variables);
     if (!variables.length) throw new Error("Pass --variables name[:type],...");
     const count = boundedInteger(opt.count, 10, 2, 1000, "--count");
     const intervalMs = boundedInteger(opt.interval, 200, 20, 60000, "--interval");
-    if (opt["add-to"]) {
-      const types = Object.fromEntries(variables.filter(item => item.type).map(item => [item.name, item.type]));
-      await call(workspace, "watch.add", {
-        variables: variables.map(item => item.name),
-        types,
-        destination: opt["add-to"]
-      });
-    }
     const result = await call(workspace, "variables.sample", {
       variables,
       count,
@@ -256,7 +376,7 @@ async function main() {
       }
     }
     const latest = result.samples?.length ? result.samples[result.samples.length - 1].values : {};
-    process.stdout.write(JSON.stringify({
+    process.stdout.write(stringify({
       type: "trend",
       source: result.source,
       elf: result.elf,
@@ -266,11 +386,27 @@ async function main() {
     }) + "\n");
     return;
   }
+  if (opt.count !== undefined && !opt.list && !opt.elf && !opt.port) {
+    const variables = bridgeVariables || variableSpecs(opt.variables);
+    const count = boundedInteger(opt.count, 1, 1, 1000, "--count");
+    const intervalMs = boundedInteger(opt.interval, 200, 20, 60000, "--interval");
+    const result = await call(workspace, "variables.sample", {
+      variables,
+      count,
+      intervalMs
+    }, Math.min(2147483647, count * intervalMs + 30000));
+    for (const sample of result.samples || []) {
+      process.stdout.write(stringify({ type: "sample", source: result.source, elf: result.elf, ...sample }) + "\n");
+    }
+    return;
+  }
   // 最常见路径只需变量名：扩展自动从最新 ELF/DWARF 推断类型，并选择复用
-  // 当前采样连接或临时启动探针读取一次。无需 Agent 搜索源码或要求用户先点“开始”。
-  if (!opt.list && !opt.trend && opt.count === undefined && !opt["add-to"] && !opt.elf && !opt.port) {
-    const result = await call(workspace, "variables.read", { variables: variableSpecs(opt.variables) });
-    process.stdout.write(JSON.stringify({ type: "sample", ...result }) + "\n");
+  // 当前采样连接或临时启动探针读取一次。--add-to 也必须走此路径：
+  // 只传用户显式指定的类型，无后缀时由扩展使用 DWARF，不得按符号宽度猜测。
+  if (!opt.list && !opt.trend && opt.count === undefined && !opt.elf && !opt.port) {
+    const variables = bridgeVariables || variableSpecs(opt.variables);
+    const result = await call(workspace, "variables.read", { variables });
+    process.stdout.write(stringify({ type: "sample", ...result }) + "\n");
     return;
   }
   const selectedElf = opt.elf || newestElf(workspace);
@@ -281,7 +417,7 @@ async function main() {
   const symbols = parsed.symbols;
   const snapshot = parsed.snapshot;
   if (opt.list) {
-    for (const s of symbols) process.stdout.write(JSON.stringify({ elf, elfSha256: snapshot.sha256, elfMtimeMs: snapshot.mtimeMs, ...s, inferredType: infer(s.size), compositeCandidate: s.size > 4 }) + "\n");
+    for (const s of symbols) process.stdout.write(stringify({ elf, elfSha256: snapshot.sha256, elfMtimeMs: snapshot.mtimeMs, ...s, inferredType: infer(s.size), compositeCandidate: s.size > 8 }) + "\n");
     return;
   }
   const requested = String(opt.variables || "").split(",").filter(Boolean).map(spec => {
@@ -299,7 +435,7 @@ async function main() {
     const destination = opt["add-to"];
     const types = Object.fromEntries(requested.map(item => [item.name, item.type]));
     const added = await call(workspace, "watch.add", { variables: requested.map(item => item.name), types, destination });
-    process.stdout.write(JSON.stringify({ type: "watchUpdate", destination, ...added }) + "\n");
+    process.stdout.write(stringify({ type: "watchUpdate", destination, ...added }) + "\n");
     if (!opt.read && !opt.trend && opt.count === undefined) return;
   }
   const tcl = new Tcl(boundedInteger(opt.port, 6666, 1, 65535, "--port"));
@@ -320,14 +456,14 @@ async function main() {
         const suffix = `0x${v.address.toString(16)} 8 ${WIDTH[v.type]}`;
         let raw = await tcl.command(`ocd_read_memory ${suffix}`), bytes = memoryValues(raw);
         if (bytes.length < WIDTH[v.type]) { raw = await tcl.command(`read_memory ${suffix}`); bytes = memoryValues(raw); }
-        values[v.name] = { value: decode(bytes, v.type), type: v.type, address: `0x${v.address.toString(16)}` };
+        values[v.name] = { value: decode(bytes, v.type), valueText: decodeText(bytes, v.type), type: v.type, address: `0x${v.address.toString(16)}` };
         series[v.name].push({ timestamp, value: values[v.name].value });
       }
-      process.stdout.write(JSON.stringify({ type: "sample", elf, elfSha256: snapshot.sha256, elfMtimeMs: snapshot.mtimeMs, timestamp, values }) + "\n");
+      process.stdout.write(stringify({ type: "sample", elf, elfSha256: snapshot.sha256, elfMtimeMs: snapshot.mtimeMs, timestamp, values }) + "\n");
       if (sample + 1 < count) await new Promise(resolve => setTimeout(resolve, interval));
     }
     if (opt.trend) {
-      process.stdout.write(JSON.stringify({
+      process.stdout.write(stringify({
         type: "trend", elf, elfSha256: snapshot.sha256,
         trends: Object.fromEntries(Object.entries(series).map(([name, points]) => [name, summarize(points)]))
       }) + "\n");
@@ -337,8 +473,8 @@ async function main() {
 
 if (require.main === module) main().catch(error => {
   const argv = process.argv.slice(2);
-  const operation = argv.includes("--trend") ? "variables.trend" : (argv.includes("--list") ? "variables.list" : "variables.read");
+  const operation = argv.includes("--export-csv") ? "variables.exportCsv" : argv.includes("--trend") ? "variables.trend" : (argv.includes("--list") ? "variables.list" : "variables.read");
   writeDiagnostic(error, { operation });
   process.exitCode = 1;
 });
-module.exports = { args, boundedInteger, variableSpecs, parseSymbolsBuffer, memoryValues, decode, infer, readStableElf, summarize };
+module.exports = { args, boundedInteger, parseTimestamp, exportRange, exportRangeDetails, variableSpecs, parseSymbolsBuffer, memoryValues, decode, decodeText, infer, readStableElf, summarize, stringify };

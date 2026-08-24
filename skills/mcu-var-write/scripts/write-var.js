@@ -22,9 +22,7 @@ function parseSet(text) {
         if (eq <= 0 || eq === part.length - 1) throw new Error(`Invalid assignment (expected name=value): ${part}`);
         const name = part.slice(0, eq).trim();
         const rawValue = part.slice(eq + 1).trim();
-        const value = Number(rawValue);
-        if (!Number.isFinite(value)) throw new Error(`Value is not a number: ${part}`);
-        values.push({ name, value });
+        values.push({ name, value: rawValue });
     }
     if (!values.length) throw new Error("--set requires at least one name=value pair");
     return values;

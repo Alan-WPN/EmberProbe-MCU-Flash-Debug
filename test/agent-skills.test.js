@@ -5,7 +5,7 @@ const os = require("os");
 const path = require("path");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
-const { AgentBridge } = require("../src/agentBridge");
+const { AgentBridge, stringifyJson } = require("../src/agentBridge");
 const { call, descriptor: descriptorOf, diagnosticForError } = require("../skills/_emberprobe/agent-client");
 const configSkill = require("../skills/mcu-config/scripts/config");
 const liveSkill = require("../skills/mcu-live-watch/scripts/read-live");
@@ -38,6 +38,20 @@ const execFileAsync = promisify(execFile);
     const changedElfDiagnostic = diagnosticForError(Object.assign(new Error("ELF changed"), { code: "ELF_CHANGED_DURING_WRITE_CONFIRMATION" }));
     assert.strictEqual(changedElfDiagnostic.error.category, "write_safety");
     assert.strictEqual(changedElfDiagnostic.error.retryable, false);
+    assert.deepStrictEqual(JSON.parse(stringifyJson({ nan: NaN, pos: Infinity, neg: -Infinity })), {
+        nan: "NaN", pos: "Infinity", neg: "-Infinity"
+    });
+    assert.deepStrictEqual(liveSkill.exportRange({ last: "10" }, 20000), { from: 10000, to: 20000 });
+    assert.deepStrictEqual(liveSkill.exportRange({ from: "1000000000000", to: "2000000000000" }, 0), {
+        from: 1000000000000,
+        to: 2000000000000
+    });
+    const localClockRange = liveSkill.exportRange({ from: "12:43", to: "12:44" }, Date.UTC(2026, 7, 24));
+    const localClockDetails = liveSkill.exportRangeDetails({ from: "12:43", to: "12:44" }, localClockRange);
+    assert.strictEqual(localClockDetails.bareClockUsesLocalTime, true);
+    assert.ok(localClockDetails.resolvedUtc.from.endsWith("Z") && localClockDetails.localTimeZone);
+    assert.ok(localClockDetails.guidance.includes("ISO 8601"));
+    assert.throws(() => liveSkill.exportRange({ from: "2026-08-24T12:00:00Z", to: "2026-08-24T11:00:00Z" }), /must not be later/);
 
     const rising = liveSkill.summarize([
         { timestamp: 0, value: 1 },
@@ -72,6 +86,8 @@ const execFileAsync = promisify(execFile);
     const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-bridge-storage-"));
     // 捕获 chip.read 实际收到的参数，验证 --fields 单独使用时不会回落到 identity 组
     const chipReadParams = [];
+    const csvExportParams = [];
+    const watchAddParams = [];
     const bridge = new AgentBridge(root, async (method, params) => {
         if (method === "config.set") {
             // 与扩展端 _setAgentConfiguration 相同的守卫：openocdPath 不允许经 Agent Bridge 修改
@@ -81,6 +97,10 @@ const execFileAsync = promisify(execFile);
         if (method === "chip.read") {
             chipReadParams.push(params);
             return { core: "M4", chip: "STM32F407", deviceId: "0x463", flashSize: "1024 KB" };
+        }
+        if (method === "watch.add") {
+            watchAddParams.push(params);
+            return { method, params };
         }
         if (method === "variables.write") {
             if (!params.confirmationId) return {
@@ -95,6 +115,24 @@ const execFileAsync = promisify(execFile);
                 elf: { path: "firmware.elf", sha256: "test" },
                 results: [{ name: "kp", resolvedName: "kp", address: "0x20000000", type: "f32", previous: 0.2, written: 0.5, readBack: 0.5, verified: true }],
                 permission: { mode: params.remember ? "workspace" : "once", trusted: !!params.remember }
+            };
+        }
+        if (method === "variables.exportCsv") {
+            csvExportParams.push(params);
+            if (params.variables.includes("empty")) {
+                throw Object.assign(new Error("The selected range has no chart samples"), {
+                    code: "CSV_EXPORT_EMPTY",
+                    details: { availableRange: { from: 1000, to: 2000 } }
+                });
+            }
+            return {
+                panelId: params.panelId || 1,
+                names: params.variables.length ? params.variables : ["Tick", "sinx"],
+                from: params.from || 1000,
+                to: params.to,
+                seriesCount: params.variables.length || 2,
+                rowCount: 2,
+                csv: "\uFEFFtime,Tick\r\n1970-01-01T00:00:01.000Z,1\r\n"
             };
         }
         if (method === "variables.write.permission") return { trusted: false, scope: "workspace" };
@@ -155,6 +193,76 @@ const execFileAsync = promisify(execFile);
         const fastPayload = JSON.parse(fastPath.stdout);
         assert.strictEqual(fastPayload.method, "variables.read");
         assert.deepStrictEqual(fastPayload.params.variables, [{ name: "tick" }, { name: "sinx" }]);
+        const inferredAdd = await execFileAsync(process.execPath, [
+            path.resolve(__dirname, "../skills/mcu-live-watch/scripts/read-live.js"),
+            "--workspace", root,
+            "--variables", "g_f32,g_f64",
+            "--add-to", "chart"
+        ]);
+        const inferredAddPayload = JSON.parse(inferredAdd.stdout);
+        assert.strictEqual(inferredAddPayload.method, "watch.add");
+        assert.deepStrictEqual(inferredAddPayload.params.types, {}, "--add-to without suffixes must let the extension use DWARF types");
+        const explicitAdd = await execFileAsync(process.execPath, [
+            path.resolve(__dirname, "../skills/mcu-live-watch/scripts/read-live.js"),
+            "--workspace", root,
+            "--variables", "g_f32:f32,g_f64:f64",
+            "--add-to", "chart"
+        ]);
+        const explicitAddPayload = JSON.parse(explicitAdd.stdout);
+        assert.deepStrictEqual(explicitAddPayload.params.types, { g_f32: "f32", g_f64: "f64" });
+        const countedAdd = await execFileAsync(process.execPath, [
+            path.resolve(__dirname, "../skills/mcu-live-watch/scripts/read-live.js"),
+            "--workspace", root,
+            "--variables", "g_f32",
+            "--add-to", "chart",
+            "--count", "2",
+            "--interval", "20"
+        ]);
+        assert.ok(countedAdd.stdout.split("\n").filter(Boolean).every(line => JSON.parse(line).type === "sample"));
+        assert.deepStrictEqual(watchAddParams.at(-1).types, {}, "combined --add-to/--count must still defer type resolution to DWARF");
+        const csvRead = await execFileAsync(process.execPath, [
+            path.resolve(__dirname, "../skills/mcu-live-watch/scripts/read-live.js"),
+            "--workspace", root,
+            "--export-csv",
+            "--variables", "Tick",
+            "--last", "10",
+            "--panel", "1"
+        ]);
+        const csvReadPayload = JSON.parse(csvRead.stdout);
+        assert.strictEqual(csvReadPayload.type, "csvExport");
+        assert.ok(csvReadPayload.csv.startsWith("\uFEFFtime,Tick"));
+        assert.strictEqual(csvReadPayload.requestedRange.resolvedUtc.to.endsWith("Z"), true);
+        assert.deepStrictEqual(csvExportParams.at(-1).variables, ["Tick"]);
+        assert.strictEqual(csvExportParams.at(-1).panelId, 1);
+        assert.strictEqual(csvExportParams.at(-1).to - csvExportParams.at(-1).from, 10000);
+        const csvOutput = path.join(root, "exports", "watch.csv");
+        const csvWrite = await execFileAsync(process.execPath, [
+            path.resolve(__dirname, "../skills/mcu-live-watch/scripts/read-live.js"),
+            "--workspace", root,
+            "--export-csv",
+            "--output", "exports/watch.csv"
+        ]);
+        const csvWritePayload = JSON.parse(csvWrite.stdout);
+        assert.strictEqual(csvWritePayload.output, csvOutput);
+        assert.ok(!Object.prototype.hasOwnProperty.call(csvWritePayload, "csv"), "file exports should return metadata instead of duplicating CSV text");
+        assert.ok(fs.readFileSync(csvOutput, "utf8").startsWith("\uFEFFtime,Tick"));
+        let emptyCsvDiagnostic;
+        try {
+            await execFileAsync(process.execPath, [
+                path.resolve(__dirname, "../skills/mcu-live-watch/scripts/read-live.js"),
+                "--workspace", root,
+                "--export-csv",
+                "--variables", "empty",
+                "--from", "12:43",
+                "--to", "12:44"
+            ]);
+        } catch (error) {
+            emptyCsvDiagnostic = JSON.parse(error.stderr);
+        }
+        assert.strictEqual(emptyCsvDiagnostic.error.code, "CSV_EXPORT_EMPTY");
+        assert.strictEqual(emptyCsvDiagnostic.error.details.requestedRange.bareClockUsesLocalTime, true);
+        assert.ok(emptyCsvDiagnostic.error.details.requestedRange.resolvedUtc.from.endsWith("Z"));
+        assert.ok(emptyCsvDiagnostic.error.suggestedActions[0].includes("ISO 8601 UTC"));
 
         // —— mcu-chip-info：--fields 单独使用时 sections 必须为空，否则扩展端会把 identity 整组字段并回结果 ——
         await execFileAsync(process.execPath, [

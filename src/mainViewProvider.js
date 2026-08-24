@@ -27,7 +27,7 @@ const { ElfService } = require("./services/elfService");
 const { OpenOcdStatusService } = require("./services/openocdStatusService");
 const { SkillStatusService, hasWorkspaceSkills } = require("./services/skillStatusService");
 const { ChipInfoService } = require("./services/chipInfoService");
-const { LiveWatchService } = require("./services/liveWatchService");
+const { LiveWatchService, buildActiveReadPlan, nextLivePanelId, selectFocusedPanel } = require("./services/liveWatchService");
 const { externalizeWebviewHtml } = require("./webviewAssets");
 const fs = require("fs");
 const os = require("os");
@@ -129,9 +129,11 @@ class MainViewProvider {
         this._probeCoordinator = new ProbeCoordinator();
         this._recentProgress = [];
         this._liveSession = null;
-        this._livePanel = null;
+        this._livePanels = new Map();
+        this._livePanelFocusOrder = 0;
+        this._pendingCsvExports = new Map();
+        this._csvExportSeq = 0;
         this._liveWatchService = new LiveWatchService(elfSymbols);
-        this._latestGraphSamples = this._liveWatchService.latestGraphSamples;
         this._latestSidebarSamples = this._liveWatchService.latestSidebarSamples;
         this._liveConsumers = new Set();
         this._consumerTypesCache = null;
@@ -152,7 +154,7 @@ class MainViewProvider {
                 this._elfService.invalidate();
                 this._invalidateConsumerTypes();
                 this.updateView();
-                this._syncGraphTarget(message => this._livePanel?.webview.postMessage(message));
+                for (const entry of this._livePanels.values()) this._syncGraphTarget(entry);
             }
         });
         this._flashService = new FlashService(openocdRunner);
@@ -205,6 +207,7 @@ class MainViewProvider {
                 'config.get': () => this._configurationSnapshot(),
                 'config.set': params => this._setAgentConfiguration(params.values || {}),
                 'watch.add': params => this._addAgentWatch(params),
+                'variables.exportCsv': params => this._exportAgentCsv(params || {}),
                 'variables.read': params => this._readAgentVariables(params),
                 'variables.sample': params => this._sampleAgentVariables(params),
                 'variables.write': params => this._writeAgentVariables(params),
@@ -235,6 +238,7 @@ class MainViewProvider {
     _setLang(lang) {
         this._lang = i18n.normalizeLang(lang);
         this._context.globalState.update('emberprobe.lang', this._lang);
+        for (const entry of this._livePanels.values()) entry.panel.title = this._t('lw.panelTitle', { n: entry.panelId });
         return this._lang;
     }
     _commandContext(resource) {
@@ -488,6 +492,43 @@ class MainViewProvider {
         assertAgentSettable(values);
         return this._configurationStore.update(values);
     }
+    _focusedLivePanel() {
+        return selectFocusedPanel(this._livePanels);
+    }
+    _exportAgentCsv(params) {
+        const requestedPanelId = params.panelId === undefined ? null : Number(params.panelId);
+        const entry = requestedPanelId === null ? this._focusedLivePanel() : this._livePanels.get(requestedPanelId);
+        if (!entry || !entry.ready) {
+            throw Object.assign(new Error('Open a Live Watch chart panel before exporting its history'), {
+                code: 'LIVE_PANEL_NOT_OPEN'
+            });
+        }
+        const names = Array.isArray(params.variables)
+            ? Array.from(new Set(params.variables.map(value => String(value || '').trim()).filter(Boolean)))
+            : [];
+        const from = params.from === undefined ? undefined : Number(params.from);
+        const to = params.to === undefined ? Date.now() : Number(params.to);
+        if ((from !== undefined && !Number.isFinite(from)) || !Number.isFinite(to) || (from !== undefined && from > to)) {
+            throw Object.assign(new Error('CSV export time range is invalid'), { code: 'INVALID_CSV_RANGE' });
+        }
+        const requestId = `agent-csv-${Date.now()}-${++this._csvExportSeq}`;
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+                this._pendingCsvExports.delete(requestId);
+                reject(Object.assign(new Error('Timed out while reading chart history'), { code: 'CSV_EXPORT_TIMEOUT' }));
+            }, 10000);
+            this._pendingCsvExports.set(requestId, { panelId: entry.panelId, resolve, reject, timer });
+            entry.post({ type: 'agentExportCsv', requestId, names, from, to });
+        });
+    }
+    _rejectPanelCsvExports(panelId) {
+        for (const [requestId, pending] of this._pendingCsvExports) {
+            if (pending.panelId !== panelId) continue;
+            clearTimeout(pending.timer);
+            this._pendingCsvExports.delete(requestId);
+            pending.reject(Object.assign(new Error('The selected Live Watch panel was closed'), { code: 'LIVE_PANEL_NOT_OPEN' }));
+        }
+    }
     async _addAgentWatch(params) {
         const names = Array.isArray(params.variables) ? params.variables.map(String) : [];
         if (!names.length) throw Object.assign(new Error('No variables supplied'), { code: 'NO_VARIABLES' });
@@ -534,11 +575,13 @@ class MainViewProvider {
             await this._context.workspaceState.update(key, current.concat(added));
             results[target] = { added: added.map(item => item.name), alreadyPresent: resolved.filter(item => existing.has(item.name)).map(item => item.name) };
         };
+        const focusedPanel = this._focusedLivePanel();
+        const chartKey = focusedPanel?.watchKey || CACHE_KEYS.watchList;
         if (destination === 'sidebar' || destination === 'both') await addTo(CACHE_KEYS.sidebarWatchList, 'sidebar');
-        if (destination === 'chart' || destination === 'both') await addTo(CACHE_KEYS.watchList, 'chart');
+        if (destination === 'chart' || destination === 'both') await addTo(chartKey, 'chart');
         this._invalidateConsumerTypes();
         this._syncSidebarTarget(message => this._webviewView?.webview.postMessage(message));
-        this._syncGraphTarget(message => this._livePanel?.webview.postMessage(message));
+        for (const entry of this._livePanels.values()) if (entry.watchKey === chartKey) this._syncGraphTarget(entry);
         if (this._liveSession) this._liveSession.setWatch(this._activeReadPlan());
         return results;
     }
@@ -609,6 +652,7 @@ class MainViewProvider {
             values[item.name] = {
                 requestedName: item.requestedName,
                 value: sample?.bytes ? elfSymbols.decodeValue(sample.bytes, item.type) : null,
+                valueText: sample?.bytes ? elfSymbols.decodeValueText(sample.bytes, item.type) : null,
                 type: item.type,
                 address: `0x${item.address.toString(16).toUpperCase()}`
             };
@@ -625,6 +669,7 @@ class MainViewProvider {
                     values[comp.requestedName] = {
                         requestedName: comp.requestedName,
                         value: node.value,
+                        valueText: node.valueText ?? null,
                         type: node.type,
                         address: addrHex(node.offset)
                     };
@@ -816,7 +861,16 @@ class MainViewProvider {
             if (!inWritable(target.address, target.size)) {
                 throw Object.assign(new Error(`Target address is outside writable RAM sections (.data/.bss): ${req.name}`), { code: 'WRITE_NOT_ALLOWED', details: { name: target.name, address: `0x${target.address.toString(16).toUpperCase()}` } });
             }
-            items.push({ requestedName: req.name, name: target.name, address: target.address, type: target.type, size: target.size, bytes, value: elfSymbols.decodeValue(bytes, target.type) });
+            items.push({
+                requestedName: req.name,
+                name: target.name,
+                address: target.address,
+                type: target.type,
+                size: target.size,
+                bytes,
+                value: elfSymbols.decodeValue(bytes, target.type),
+                valueText: elfSymbols.decodeValueText(bytes, target.type)
+            });
         }
         return { elfResult, items };
     }
@@ -837,8 +891,11 @@ class MainViewProvider {
                 address: `0x${i.address.toString(16).toUpperCase()}`,
                 type: i.type,
                 previous: prev?.bytes ? elfSymbols.decodeValue(prev.bytes, i.type) : null,
+                previousText: prev?.bytes ? elfSymbols.decodeValueText(prev.bytes, i.type) : null,
                 written: i.value,
+                writtenText: i.valueText,
                 readBack: post?.bytes ? elfSymbols.decodeValue(post.bytes, i.type) : null,
+                readBackText: post?.bytes ? elfSymbols.decodeValueText(post.bytes, i.type) : null,
                 verified
             };
         });
@@ -1011,31 +1068,57 @@ class MainViewProvider {
     }
     // 打开/聚焦实时变量查看面板（独立 WebviewPanel，编辑区宽度足够绘图）
     openLiveWatchPanel() {
-        if (this._livePanel) { this._livePanel.reveal(); return; }
+        const panelId = nextLivePanelId(this._livePanels);
+        const watchKey = panelId === 1 ? CACHE_KEYS.watchList : `${CACHE_KEYS.watchList}.${panelId}`;
         const cfg = vscode.workspace.getConfiguration('emberprobe');
-        const panel = vscode.window.createWebviewPanel('emberprobe.liveWatch', this._t('lw.title'), vscode.ViewColumn.Active, {
+        const panel = vscode.window.createWebviewPanel('emberprobe.liveWatch', this._t('lw.panelTitle', { n: panelId }), vscode.ViewColumn.Active, {
             enableScripts: true,
             retainContextWhenHidden: true,
             localResourceRoots: [this._webviewAssetRootUri]
         });
-        this._livePanel = panel;
         const post = (m) => panel.webview.postMessage(m);
+        const entry = {
+            panelId, panel, post, watchKey,
+            latestSamples: new Map(),
+            ready: false,
+            focusOrder: ++this._livePanelFocusOrder
+        };
+        this._livePanels.set(panelId, entry);
+        this._invalidateConsumerTypes();
         panel.webview.html = this._externalizeWebview(panel.webview, liveWatchView.getLiveWatchContent({
             maxSamples: cfg.get('maxSamples', 2000),
-            intervalMs: cfg.get('sampleIntervalMs', 100)
+            intervalMs: cfg.get('sampleIntervalMs', 100),
+            panelId
         }, this._lang), 'live-watch');
+        panel.onDidChangeViewState(event => {
+            if (event.webviewPanel.active) entry.focusOrder = ++this._livePanelFocusOrder;
+        });
         panel.onDidDispose(() => {
-            this._livePanel = null;
-            // 图表面板关闭时，若侧边栏不可见，停止采样以释放探针；侧边栏仍可见则保持运行由其接管
-            if (this._liveWatchRunning && !(this._webviewView && this._webviewView.visible)) {
-                this.stopLiveWatch();
+            this._livePanels.delete(panelId);
+            this._rejectPanelCsvExports(panelId);
+            this._invalidateConsumerTypes();
+            if (this._liveWatchRunning) {
+                if (!this._livePanels.size && !(this._webviewView && this._webviewView.visible)) this.stopLiveWatch();
+                else {
+                    const active = this._activeReadPlan();
+                    if (active.length && this._liveSession) this._liveSession.setWatch(active);
+                    else if (!active.length) this.stopLiveWatch();
+                }
             }
         });
         panel.webview.onDidReceiveMessage(async (message) => {
             try {
+                if (message.panelId !== undefined && Number(message.panelId) !== panelId) {
+                    throw Object.assign(new Error('Live panel identity mismatch'), { code: 'INVALID_PANEL_ID' });
+                }
                 switch (message.type) {
                     case 'ready':
-                        this._syncGraphTarget(post);
+                        entry.ready = true;
+                        this._syncGraphTarget(entry);
+                        if (this._liveSession) {
+                            const active = this._activeReadPlan();
+                            if (active.length) this._liveSession.setWatch(active);
+                        }
                         break;
                     case 'importVariables': {
                         const result = this.readElfSymbols();
@@ -1050,9 +1133,9 @@ class MainViewProvider {
                         break;
                     }
                     case 'saveWatch':
-                        await this._context.workspaceState.update(CACHE_KEYS.watchList, message.items || []);
+                        await this._context.workspaceState.update(watchKey, message.items || []);
                         this._invalidateConsumerTypes();
-                        this._pruneSampleMap(this._latestGraphSamples, CACHE_KEYS.watchList);
+                        this._pruneSampleMap(entry.latestSamples, watchKey);
                         if (this._liveSession) {
                             const active = this._activeReadPlan();
                             if (active.length) this._liveSession.setWatch(active);
@@ -1060,7 +1143,8 @@ class MainViewProvider {
                         }
                         break;
                     case 'start':
-                        await this._context.workspaceState.update(CACHE_KEYS.watchList, message.items || []);
+                        await this._context.workspaceState.update(watchKey, message.items || []);
+                        this._invalidateConsumerTypes();
                         await this.startLiveWatch(message.items || [], message.intervalMs, 'graph');
                         break;
                     case 'stop':
@@ -1068,7 +1152,7 @@ class MainViewProvider {
                         else this.stopLiveWatch();
                         break;
                     case 'setInterval':
-                        if (this._liveSession) this._liveSession.setIntervalMs(message.intervalMs);
+                        this._setLiveInterval(message.intervalMs);
                         break;
                     case 'exportCsv': {
                         if (!message.csv) break;
@@ -1079,18 +1163,46 @@ class MainViewProvider {
                             defaultUri: folder ? vscode.Uri.joinPath(folder, name) : vscode.Uri.joinPath(vscode.Uri.file(os.homedir()), name),
                             filters: { 'CSV': ['csv'] }
                         });
-                        if (!target) break;
+                        if (!target) { post({ type: 'exportCsvResult', ok: false, cancelled: true }); break; }
                         try {
                             await fs.promises.writeFile(target.fsPath, message.csv, 'utf8');
                             vscode.window.showInformationMessage(this._t('msg.csvExported', { file: path.basename(target.fsPath) }));
+                            post({ type: 'exportCsvResult', ok: true, seriesCount: Number(message.seriesCount) || 0, rowCount: Number(message.rowCount) || 0 });
                         } catch (error) {
                             vscode.window.showErrorMessage(this._t('msg.csvExportFailed', { msg: error.message }));
+                            post({ type: 'exportCsvResult', ok: false, message: error.message });
+                        }
+                        break;
+                    }
+                    case 'agentExportCsvResult': {
+                        const requestId = String(message.requestId || '');
+                        const pending = this._pendingCsvExports.get(requestId);
+                        if (!pending || pending.panelId !== panelId) {
+                            throw Object.assign(new Error('Unknown CSV export request'), { code: 'INVALID_CSV_EXPORT_RESPONSE' });
+                        }
+                        clearTimeout(pending.timer);
+                        this._pendingCsvExports.delete(requestId);
+                        if (!message.ok) {
+                            pending.reject(Object.assign(new Error(message.message || 'Unable to export chart history'), {
+                                code: message.code || 'CSV_EXPORT_FAILED',
+                                details: message.details
+                            }));
+                        } else {
+                            pending.resolve({
+                                panelId,
+                                names: Array.isArray(message.names) ? message.names : [],
+                                from: message.from,
+                                to: message.to,
+                                seriesCount: Number(message.seriesCount) || 0,
+                                rowCount: Number(message.rowCount) || 0,
+                                csv: String(message.csv || '')
+                            });
                         }
                         break;
                     }
                     case 'setLang': {
                         this._setLang(message.lang);
-                        this._webviewView?.webview.postMessage({ type: 'setLang', lang: this._lang });
+                        this._postLive({ type: 'setLang', lang: this._lang });
                         break;
                     }
                 }
@@ -1105,13 +1217,13 @@ class MainViewProvider {
     }
     // 图表和侧边栏各自维护选择；同一探针连接采样两边当前启用列表的并集。
     _postLive(message) {
-        this._livePanel?.webview.postMessage(message);
+        for (const entry of this._livePanels.values()) entry.post(message);
         this._webviewView?.webview.postMessage(message);
     }
     _postConsumerStatuses(payload, error = false) {
         const p = typeof payload === 'string' ? { message: payload } : (payload || {});
         const message = { type: 'liveStatus', running: this._liveWatchRunning, ...p, error };
-        this._livePanel?.webview.postMessage(message);
+        for (const entry of this._livePanels.values()) entry.post(message);
         this._webviewView?.webview.postMessage(message);
     }
     _scalarWatchList(key) {
@@ -1122,15 +1234,23 @@ class MainViewProvider {
             return normalized;
         } catch (e) { return []; }
     }
-    _syncGraphTarget(post) {
-        post({ type: 'watchList', items: this._scalarWatchList(CACHE_KEYS.watchList) });
+    _syncGraphTarget(entry) {
+        if (!entry || !entry.ready) return;
+        const post = entry.post;
+        post({ type: 'watchList', items: this._scalarWatchList(entry.watchKey) });
         post({ type: 'liveStatus', ...(this._agentSamplingStatus || {
             running: this._liveWatchRunning,
             key: this._liveWatchRunning ? 'sb.sampling' : 'sb.stopped'
         }) });
-        if (this._latestGraphSamples.size) {
+        if (entry.latestSamples.size) {
             const now = Date.now();
-            post({ type: 'liveSample', samples: Array.from(this._latestGraphSamples.values()).map(s => ({ ...s, t: now })) });
+            const scalarSamples = [], compositeSamples = [];
+            for (const sample of entry.latestSamples.values()) {
+                if (sample.tree) compositeSamples.push({ ...sample, t: now });
+                else scalarSamples.push({ ...sample, t: now });
+            }
+            if (scalarSamples.length) post({ type: 'liveSample', samples: scalarSamples });
+            if (compositeSamples.length) post({ type: 'liveCompositeSample', samples: compositeSamples });
         }
     }
     _syncSidebarTarget(post) {
@@ -1162,33 +1282,15 @@ class MainViewProvider {
     // 读取计划按变量名去重，宽度取两侧的最大值，一次读取覆盖所有消费者。
     // 复合变量（结构体/数组）展开为叶子成员读取项，按变量整体地址范围合并读取。
     _activeReadPlan() {
-        const byName = new Map();
-        const add = (item) => {
-            if (!item?.name) return;
-            if (item.isComposite && item.compositeLayout) {
-                // 复合变量：展开为叶子成员，整体读取
-                const sym = { name: item.name, address: item.address, size: item.size };
-                const leaves = elfSymbols.expandCompositeLeaves(sym, item.compositeLayout, null);
-                if (leaves.length) {
-                    // 用变量基址+总大小作为整体读取范围
-                    const totalSize = item.size || leaves.reduce((max, l) => Math.max(max, (l.address - ((item.address >>> 0))) + l.size), 0);
-                    byName.set(item.name, { name: item.name, address: item.address, size: totalSize, isComposite: true });
-                }
-            } else {
-                const len = elfSymbols.typeByteLength(item.type);
-                const prev = byName.get(item.name);
-                if (!prev) byName.set(item.name, { name: item.name, address: item.address, size: len });
-                else if (len > prev.size) prev.size = len;
-            }
-        };
-        this._scalarWatchList(CACHE_KEYS.watchList).forEach(add);
-        this._scalarWatchList(CACHE_KEYS.sidebarWatchList).forEach(add);
+        const lists = [];
+        for (const entry of this._livePanels.values()) lists.push(this._scalarWatchList(entry.watchKey));
+        lists.push(this._scalarWatchList(CACHE_KEYS.sidebarWatchList));
         // 写入列表变量也纳入采样读取，使写入卡片能实时同步当前值；不回写存储，避免丢失 min/max 等 UI 字段
         try {
             const writeItems = this._context.workspaceState.get(CACHE_KEYS.sidebarWriteList) || [];
-            validation.normalizeWatchList(writeItems, this.readElfSymbols().symbols).forEach(add);
+            lists.push(validation.normalizeWatchList(writeItems, this.readElfSymbols().symbols));
         } catch (e) { /* ELF 不可用时忽略写入列表 */ }
-        return Array.from(byName.values());
+        return buildActiveReadPlan(lists, elfSymbols);
     }
     // 各消费者对每个变量的观察类型，用于把同一份原始字节按各自类型解码后分别推送。
     _consumerTypes() {
@@ -1202,13 +1304,28 @@ class MainViewProvider {
         for (const item of this._context.workspaceState.get(CACHE_KEYS.sidebarWriteList) || []) {
             if (item?.name && item.type && !sidebar.has(item.name)) sidebar.set(item.name, item.type);
         }
-        return { graph: build(CACHE_KEYS.watchList), sidebar };
+        const graphs = new Map();
+        for (const entry of this._livePanels.values()) graphs.set(entry.watchKey, build(entry.watchKey));
+        return { graphs, sidebar };
     }
     _getCachedConsumerTypes() {
         if (!this._consumerTypesCache) this._consumerTypesCache = this._consumerTypes();
         return this._consumerTypesCache;
     }
     _invalidateConsumerTypes() { this._consumerTypesCache = null; }
+    _compositeMap(key) {
+        const map = new Map();
+        for (const item of this._scalarWatchList(key)) {
+            if (item.isComposite && item.compositeLayout) map.set(item.name, { layout: item.compositeLayout, address: item.address });
+        }
+        return map;
+    }
+    _setLiveInterval(intervalMs) {
+        const value = validation.clampInteger(intervalMs, 100, 20, 10000);
+        if (this._liveSession) this._liveSession.setIntervalMs(value);
+        this._postLive({ type: 'liveInterval', intervalMs: value });
+        return value;
+    }
     _pruneSampleMap(map, keys) {
         const names = new Set();
         for (const key of (Array.isArray(keys) ? keys : [keys])) {
@@ -1231,6 +1348,7 @@ class MainViewProvider {
         this._liveConsumers.add('sidebar');
         if (this._liveWatchRunning && this._liveSession) {
             this._liveSession.setWatch(this._activeReadPlan());
+            if (intervalMs !== undefined) this._setLiveInterval(intervalMs);
             this._postConsumerStatuses({ key: 'sb.sampling' });
             return;
         }
@@ -1247,29 +1365,20 @@ class MainViewProvider {
             intervalMs: validation.clampInteger(intervalMs || cfg.get('sampleIntervalMs', 100), 100, 20, 10000)
         }, {
             onSample: (samples, t) => {
-                // 同一变量的原始字节按各面板自选的观察类型分别解码，避免图表/侧栏选不同 type 时数值与标签不一致
                 const types = this._getCachedConsumerTypes();
-                // 构建复合变量查找：name → { layout, address }
-                const compositeMap = new Map();
-                for (const key of [CACHE_KEYS.watchList, CACHE_KEYS.sidebarWatchList]) {
-                    for (const item of this._scalarWatchList(key)) {
-                        if (item.isComposite && item.compositeLayout && !compositeMap.has(item.name)) {
-                            compositeMap.set(item.name, { layout: item.compositeLayout, address: item.address });
-                        }
-                    }
+                for (const entry of this._livePanels.values()) {
+                    const decoded = this._liveWatchService.decodeConsumerSamples(
+                        samples, t, types.graphs.get(entry.watchKey), this._compositeMap(entry.watchKey), entry.latestSamples
+                    );
+                    if (!entry.ready) continue;
+                    if (decoded.scalarSamples.length) entry.post({ type: 'liveSample', samples: decoded.scalarSamples, t });
+                    if (decoded.compositeSamples.length) entry.post({ type: 'liveCompositeSample', samples: decoded.compositeSamples, t });
                 }
-                const { graphSamples, sidebarSamples, compositeSamples } = this._liveWatchService.decodeSamples(
-                    samples,
-                    t,
-                    types,
-                    compositeMap
+                const sidebar = this._liveWatchService.decodeConsumerSamples(
+                    samples, t, types.sidebar, this._compositeMap(CACHE_KEYS.sidebarWatchList), this._latestSidebarSamples
                 );
-                if (graphSamples.length) this._livePanel?.webview.postMessage({ type: 'liveSample', samples: graphSamples, t });
-                if (sidebarSamples.length) this._webviewView?.webview.postMessage({ type: 'liveSample', samples: sidebarSamples, t });
-                if (compositeSamples.length) {
-                    this._livePanel?.webview.postMessage({ type: 'liveCompositeSample', samples: compositeSamples, t });
-                    this._webviewView?.webview.postMessage({ type: 'liveCompositeSample', samples: compositeSamples, t });
-                }
+                if (sidebar.scalarSamples.length) this._webviewView?.webview.postMessage({ type: 'liveSample', samples: sidebar.scalarSamples, t });
+                if (sidebar.compositeSamples.length) this._webviewView?.webview.postMessage({ type: 'liveCompositeSample', samples: sidebar.compositeSamples, t });
             },
             onStatus: (msg) => this._postConsumerStatuses(msg),
             onError: (msg) => this._postLive({ type: 'liveError', message: msg }),
@@ -1287,6 +1396,7 @@ class MainViewProvider {
         try {
             await session.start();
             this._liveStarting = false;
+            this._setLiveInterval(intervalMs || cfg.get('sampleIntervalMs', 100));
             this._postConsumerStatuses({ key: 'sb.sampling' });
         } catch (error) {
             this._liveStarting = false;
@@ -1465,7 +1575,12 @@ class MainViewProvider {
                         try {
                             const result = await this._writeUiVariable(name, message.value);
                             const r = result.results && result.results[0];
-                            webviewView.webview.postMessage({ type: 'writeResult', ok: true, name, value: r ? r.readBack : message.value, seq });
+                            webviewView.webview.postMessage({
+                                type: 'writeResult', ok: true, name,
+                                value: r ? r.readBack : message.value,
+                                valueText: r ? r.readBackText : null,
+                                seq
+                            });
                         } catch (error) {
                             webviewView.webview.postMessage({ type: 'writeResult', ok: false, name, seq, key: error.i18nKey, params: error.i18nParams, message: error.message || String(error) });
                         }
@@ -1500,7 +1615,7 @@ class MainViewProvider {
                 }
                 case 'setLang': {
                     this._setLang(message.lang);
-                    this._livePanel?.webview.postMessage({ type: 'setLang', lang: this._lang });
+                    this._postLive({ type: 'setLang', lang: this._lang });
                     break;
                 }
             }

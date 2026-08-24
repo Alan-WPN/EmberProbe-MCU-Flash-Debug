@@ -1,6 +1,6 @@
 "use strict";
 const assert = require("assert");
-const { encodeValue, decodeValue } = require("../src/elfSymbols");
+const { encodeValue, decodeValue, decodeValueText } = require("../src/elfSymbols");
 const { LiveWatchSession } = require("../src/liveWatch");
 const writeSkill = require("../skills/mcu-var-write/scripts/write-var");
 
@@ -18,7 +18,22 @@ const writeSkill = require("../skills/mcu-var-write/scripts/write-var");
     assert.throws(() => encodeValue(-1, "u16"), e => e.code === "INVALID_WRITE_VALUE");
     assert.throws(() => encodeValue(1.5, "i32"), e => e.code === "INVALID_WRITE_VALUE", "integer types reject fractions");
     assert.throws(() => encodeValue(NaN, "u32"), e => e.code === "INVALID_WRITE_VALUE");
-    assert.throws(() => encodeValue(1, "u64"), e => e.code === "UNSUPPORTED_VARIABLE_TYPE");
+    assert.strictEqual(decodeValueText(encodeValue("18446744073709551615", "u64"), "u64"), "18446744073709551615");
+    assert.strictEqual(decodeValueText(encodeValue("-9223372036854775808", "i64"), "i64"), "-9223372036854775808");
+    assert.deepStrictEqual(encodeValue(0x0102030405060708n, "u64"), [8, 7, 6, 5, 4, 3, 2, 1], "u64 should use little-endian bytes");
+    assert.deepStrictEqual(encodeValue(-2n, "i64"), [0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff], "i64 should use two's-complement little-endian bytes");
+    const expectedF64 = Buffer.alloc(8);
+    expectedF64.writeDoubleLE(1.25);
+    assert.deepStrictEqual(encodeValue(1.25, "f64"), Array.from(expectedF64), "f64 should use little-endian IEEE-754 bytes");
+    assert.strictEqual(decodeValueText(encodeValue("+00042", "u64"), "u64"), "42", "encoded write echo should be canonical decimal text");
+    assert.throws(() => encodeValue(Number.MAX_SAFE_INTEGER + 1, "u64"), e => e.code === "INVALID_WRITE_VALUE", "unsafe Number inputs must be rejected");
+    assert.throws(() => encodeValue("18446744073709551616", "u64"), e => e.code === "INVALID_WRITE_VALUE");
+    assert.throws(() => encodeValue("-9223372036854775809", "i64"), e => e.code === "INVALID_WRITE_VALUE");
+    assert.throws(() => encodeValue("1e3", "u64"), e => e.code === "INVALID_WRITE_VALUE");
+    assert.ok(Number.isNaN(decodeValue(encodeValue("nan", "f64"), "f64")));
+    assert.ok(Number.isNaN(decodeValue(encodeValue("NaN", "f64"), "f64")), "f64 aliases should be case-insensitive");
+    assert.strictEqual(decodeValue(encodeValue("inf", "f64"), "f64"), Infinity);
+    assert.strictEqual(decodeValue(encodeValue("-inf", "f64"), "f64"), -Infinity);
 
     // —— _writeMemoryBytes：命令拼装、ocd_→ 无前缀回退、失败抛错 ——
     const okSession = new LiveWatchSession(null, {}, {});
@@ -59,14 +74,14 @@ const writeSkill = require("../skills/mcu-var-write/scripts/write-var");
 
     // —— write-var.js 的 --set 解析 ——
     assert.deepStrictEqual(writeSkill.parseSet("kp=0.5,counter=2"), [
-        { name: "kp", value: 0.5 }, { name: "counter", value: 2 }
+        { name: "kp", value: "0.5" }, { name: "counter", value: "2" }
     ]);
     assert.deepStrictEqual(writeSkill.parseSet("sensor.x=-3,buf[0]=255"), [
-        { name: "sensor.x", value: -3 }, { name: "buf[0]", value: 255 }
+        { name: "sensor.x", value: "-3" }, { name: "buf[0]", value: "255" }
     ]);
     assert.throws(() => writeSkill.parseSet("broken"), /Invalid assignment/);
     assert.throws(() => writeSkill.parseSet("x="), /Invalid assignment/);
-    assert.throws(() => writeSkill.parseSet("x=abc"), /not a number/);
+    assert.deepStrictEqual(writeSkill.parseSet("wide=18446744073709551615"), [{ name: "wide", value: "18446744073709551615" }]);
     assert.throws(() => writeSkill.parseSet(""), /at least one/);
     assert.deepStrictEqual(writeSkill.args(["--set", "kp=1", "--confirm", "abc", "--remember"]), { set: "kp=1", confirm: "abc", remember: true });
     assert.deepStrictEqual(writeSkill.args(["--reset-permission"]), { "reset-permission": true });

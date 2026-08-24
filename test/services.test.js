@@ -11,7 +11,12 @@ const { ElfService } = require("../src/services/elfService");
 const { OpenOcdStatusService } = require("../src/services/openocdStatusService");
 const { SkillStatusService, hasWorkspaceSkills } = require("../src/services/skillStatusService");
 const { ChipInfoService } = require("../src/services/chipInfoService");
-const { LiveWatchService } = require("../src/services/liveWatchService");
+const {
+    LiveWatchService,
+    buildActiveReadPlan,
+    nextLivePanelId,
+    selectFocusedPanel
+} = require("../src/services/liveWatchService");
 const { AgentOrchestrator } = require("../src/services/agentOrchestrator");
 
 (async () => {
@@ -183,6 +188,23 @@ const { AgentOrchestrator } = require("../src/services/agentOrchestrator");
         elfService.read();
         assert.strictEqual(dwarfParses, 2);
 
+        const noDwarfWide = new ElfService({
+            context: { workspaceState: { get: () => elf } },
+            cacheKey: "elf",
+            fs,
+            crypto: require("crypto"),
+            cleanPath: (value) => value,
+            t: (key) => key,
+            elfSymbols: {
+                parseElfSymbols: () => ({ symbols: [{ name: "wide", size: 8 }], warnings: [] }),
+                defaultType: (size) => (size === 8 ? "u64" : "u32")
+            },
+            dwarf: { parseDwarf: () => ({ types: new Map(), layouts: new Map() }) }
+        }).read().symbols[0];
+        assert.strictEqual(noDwarfWide.isComposite, false, "an 8-byte symbol without DWARF should remain a scalar");
+        assert.strictEqual(noDwarfWide.watchType, "u64");
+        assert.strictEqual(noDwarfWide.hasDwarfWriteType, false, "a guessed u64 type must remain read-only");
+
         const statusEvents = [];
         const checker = {
             probeOpenOcd: async (target) => ({ found: true, path: target, requested: target, version: "1.0" }),
@@ -285,6 +307,7 @@ const { AgentOrchestrator } = require("../src/services/agentOrchestrator");
 
         const liveService = new LiveWatchService({
             decodeValue: (bytes, type) => `${type}:${bytes[0]}`,
+            decodeValueText: (_bytes, type) => (type === "u32" ? "7" : null),
             decodeComposite: () => ({ kind: "struct" })
         });
         const decoded = liveService.decodeSamples(
@@ -297,8 +320,70 @@ const { AgentOrchestrator } = require("../src/services/agentOrchestrator");
             new Map([["sensor", { layout: { kind: "struct" } }]])
         );
         assert.strictEqual(decoded.graphSamples[0].value, "u32:7");
+        assert.strictEqual(decoded.graphSamples[0].valueText, "7");
         assert.strictEqual(decoded.sidebarSamples[0].value, "i32:7");
         assert.strictEqual(decoded.compositeSamples[0].tree.kind, "struct");
+        const perPanelLatest = new Map();
+        const perPanel = liveService.decodeConsumerSamples(
+            [{ name: "counter", bytes: [9] }],
+            456,
+            new Map([["counter", "u64"]]),
+            new Map(),
+            perPanelLatest
+        );
+        assert.strictEqual(perPanel.scalarSamples[0].value, "u64:9");
+        assert.strictEqual(perPanelLatest.get("counter").t, 456);
+        assert.strictEqual(
+            nextLivePanelId(
+                new Map([
+                    [1, {}],
+                    [3, {}]
+                ])
+            ),
+            2,
+            "closed panel slots should be reused"
+        );
+        assert.strictEqual(
+            selectFocusedPanel([
+                { panelId: 1, focusOrder: 2 },
+                { panelId: 2, focusOrder: 8 }
+            ]).panelId,
+            2
+        );
+        const mergedPlan = buildActiveReadPlan(
+            [
+                [{ name: "counter", address: 0x20000000, type: "u16" }],
+                [{ name: "counter", address: 0x20000000, type: "u64" }],
+                [
+                    {
+                        name: "sensor",
+                        address: 0x20000010,
+                        size: 12,
+                        isComposite: true,
+                        compositeLayout: { kind: "struct" }
+                    }
+                ]
+            ],
+            {
+                typeByteLength: (type) => (type === "u64" ? 8 : 2),
+                expandCompositeLeaves: () => [
+                    { address: 0x20000010, size: 4 },
+                    { address: 0x20000018, size: 4 }
+                ]
+            }
+        );
+        assert.deepStrictEqual(mergedPlan, [
+            { name: "counter", address: 0x20000000, size: 8 },
+            { name: "sensor", address: 0x20000010, size: 12, isComposite: true }
+        ]);
+        assert.deepStrictEqual(
+            buildActiveReadPlan([[{ name: "counter", address: 0x20000000, type: "u16" }]], {
+                typeByteLength: () => 2,
+                expandCompositeLeaves: () => []
+            }),
+            [{ name: "counter", address: 0x20000000, size: 2 }],
+            "closing the wider consumer should immediately shrink the merged plan"
+        );
 
         const active = new Set();
         const chipPosts = [];

@@ -6,6 +6,25 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-08-24
+
+### Added
+
+- 实时变量全链路支持 `u64`/`i64`/`f64`：64 位整数通过 `valueText` 提供精确十进制值，图表仍使用 Number 近似值绘制；Agent 读写、复合成员、侧边栏和 CSV 导出均保留精度。
+- CSV 导出对话框支持选择曲线和全部/最近 10/30/60 秒/自定义时间范围，保存成功后显示导出系列数和数据行数。
+- 实时图表支持同时打开多个面板；每个面板保留独立观察列表、类型解码和历史缓冲，共享底层 OpenOCD 会话、启停状态和采样间隔。
+- `mcu-live-watch` 1.6.1 新增图表历史 CSV 读取/导出：Agent 可按面板、曲线与绝对/最近时间区间选取数据，返回 CSV 内容或写入指定文件。
+
+### Changed
+
+- `mcu-live-watch` 升级至 1.6.1，`mcu-var-write` 升级至 1.2.0；直接 Tcl fallback 可读取 8 字节标量，写入 Skill 保留原始十进制文本避免 JavaScript Number 精度丢失。
+- CSV 双端时间轴改为常显的剪辑轨道样式；非自定义模式时置灰并禁止拖动，自定义模式默认全选且以打开导出对话框的时刻为右端。
+
+### Fixed
+
+- `mcu-live-watch --add-to` 在无显式类型后缀时改由扩展使用 DWARF 类型，避免 4/8 字节浮点变量被误存为 `u32/u64`。
+- Agent CSV 导出的时间说明优先使用 `--last` 或以 `Z` 结尾的 ISO 8601 UTC 时间；失败诊断现在同时返回裸 `HH:MM:SS` 实际解析的 UTC 区间、本机时区与偏移。
+
 ### Security
 
 - Agent Bridge 描述文件（含访问令牌）改存扩展全局存储目录，工作区只保留不含令牌的指针文件，避免令牌随 git 提交或云盘同步泄露；Bridge 停止时一并清理描述文件与指针。已安装的旧版技能脚本仍可读取旧格式描述文件，升级本版本后请在侧边栏重新安装 Agent Skills。
