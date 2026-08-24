@@ -6,6 +6,10 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+### Fixed
+
+- Flash Skills 跨平台测试在 macOS 上统一比较规范化真实路径，兼容系统将 `/var` 映射为 `/private/var`；常规 CI 仅在分支推送和 Pull Request 上运行，发布标签由 Release 工作流独立验证，避免同一标签重复执行整套门禁。
+
 ## [0.6.3] - 2026-08-24
 
 ### Added

@@ -92,7 +92,7 @@ function lastJsonLine(stdout) {
                 "--workspace", bareRoot, "--probe", "stlink.cfg", "--target", "stm32f4x.cfg"
             ]);
             const bareJson = firstJsonLine(bare.stdout);
-            assert.strictEqual(bareJson.elf, upperElf);
+            assert.strictEqual(bareJson.elf, fs.realpathSync(upperElf));
             assert.strictEqual(bareJson.ready, true);
         } finally {
             fs.rmSync(bareRoot, { recursive: true, force: true });
