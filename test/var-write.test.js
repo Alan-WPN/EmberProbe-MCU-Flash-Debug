@@ -35,19 +35,22 @@ const writeSkill = require("../skills/mcu-var-write/scripts/write-var");
     assert.strictEqual(decodeValue(encodeValue("inf", "f64"), "f64"), Infinity);
     assert.strictEqual(decodeValue(encodeValue("-inf", "f64"), "f64"), -Infinity);
 
-    // —— _writeMemoryBytes：命令拼装、ocd_→ 无前缀回退、失败抛错 ——
+    // —— _writeMemoryBytes：32 位读-改-写、ocd_→ 无前缀回退、失败抛错 ——
     const okSession = new LiveWatchSession(null, {}, {});
     const sent = [];
-    okSession._sendCommand = async (cmd) => { sent.push(cmd); return ""; };
+    okSession._readMemoryBytes = async () => [0x11, 0x22, 0x33, 0x44];
+    okSession._sendCheckedCommand = async (cmd) => { sent.push(cmd); return ""; };
     await okSession._writeMemoryBytes(0x20000010, [0x2a, 0x00]);
-    assert.deepStrictEqual(sent, ["ocd_write_memory 0x20000010 8 {0x2a 0x0}"]);
+    assert.deepStrictEqual(sent, ["ocd_write_memory 0x20000010 32 {0x4433002a}"]);
     assert.strictEqual(okSession.writeCmd, "ocd_write_memory", "keep the primary command on success");
 
     const fallbackSession = new LiveWatchSession(null, {}, {});
     const fallbackSent = [];
-    fallbackSession._sendCommand = async (cmd) => {
+    fallbackSession._readMemoryBytes = async () => [0, 0, 0, 0];
+    fallbackSession._sendCheckedCommand = async (cmd) => {
         fallbackSent.push(cmd);
-        return cmd.startsWith("ocd_") ? 'invalid command name "ocd_write_memory"' : "";
+        if (cmd.startsWith("ocd_")) throw new Error('invalid command name "ocd_write_memory"');
+        return "";
     };
     await fallbackSession._writeMemoryBytes(0x20000000, [1]);
     assert.strictEqual(fallbackSent.length, 2);
@@ -55,8 +58,23 @@ const writeSkill = require("../skills/mcu-var-write/scripts/write-var");
     assert.strictEqual(fallbackSession.writeCmd, "write_memory", "lock the fallback command");
 
     const failSession = new LiveWatchSession(null, {}, {});
-    failSession._sendCommand = async () => "Error: address out of bounds";
+    failSession._readMemoryBytes = async () => [0, 0, 0, 0];
+    failSession._sendCheckedCommand = async () => { throw new Error("address out of bounds"); };
     await assert.rejects(() => failSession._writeMemoryBytes(0x20000000, [1]), /写入内存失败/);
+
+    const alignedSession = new LiveWatchSession(null, {}, {});
+    const alignedSent = [];
+    alignedSession._readMemoryBytes = async () => { throw new Error("aligned word writes must not pre-read"); };
+    alignedSession._sendCheckedCommand = async cmd => { alignedSent.push(cmd); return ""; };
+    await alignedSession._writeMemoryBytes(0x20000000, [0x78, 0x56, 0x34, 0x12]);
+    assert.deepStrictEqual(alignedSent, ["ocd_write_memory 0x20000000 32 {0x12345678}"]);
+
+    const highAddressSession = new LiveWatchSession(null, {}, {});
+    const highAddressSent = [];
+    highAddressSession._readMemoryBytes = async () => [0x11, 0x22, 0x33, 0x44];
+    highAddressSession._sendCheckedCommand = async cmd => { highAddressSent.push(cmd); return ""; };
+    await highAddressSession._writeMemoryBytes(0x90000001, [0xaa]);
+    assert.deepStrictEqual(highAddressSent, ["ocd_write_memory 0x90000000 32 {0x4433aa11}"], "high RAM addresses must remain unsigned");
 
     // —— writeOnce：串行写入、不改 watch 列表 ——
     const session = new LiveWatchSession(null, {}, {});

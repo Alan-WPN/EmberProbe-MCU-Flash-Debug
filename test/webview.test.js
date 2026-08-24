@@ -28,6 +28,7 @@ assert.ok(sidebar.includes("status.scopes"), "skill card tooltip should break do
 assert.ok(sidebar.includes('id="openocdInstall"'), "OpenOCD card should offer bundled installation");
 assert.ok(sidebar.includes("type:'openocdAction',action:'select'"), "OpenOCD path selection should be handled inside the sidebar");
 assert.ok(sidebar.includes("m.type==='openocdStatus'"), "sidebar should render OpenOCD status messages");
+assert.ok(sidebar.includes("k==='incompatible'?'error':k"), "incompatible OpenOCD should remain visible with error styling");
 assert.ok(sidebar.includes('id="availableVars"'));
 assert.ok(sidebar.includes('type:\'saveSidebarWatch\''), "sidebar should persist an independent watch list");
 assert.ok(sidebar.includes('class="variable-browser"'), "ELF variable browser should be collapsible");

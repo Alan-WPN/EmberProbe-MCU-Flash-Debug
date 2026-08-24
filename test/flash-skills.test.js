@@ -10,18 +10,26 @@ const path = require("path");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
 const { AgentBridge } = require("../src/agentBridge");
+const flashCommon = require("../skills/_emberprobe/flash-common");
 
 const execFileAsync = promisify(execFile);
 const canRunFakeOpenOcd = process.platform !== "win32";
 
 function makeFakeOpenOcd(dir) {
+    const bin = path.join(dir, "bin");
+    const scripts = path.join(dir, "openocd", "scripts");
+    fs.mkdirSync(path.join(scripts, "interface"), { recursive: true });
+    fs.mkdirSync(path.join(scripts, "target", "geehy"), { recursive: true });
+    fs.writeFileSync(path.join(scripts, "interface", "cmsis-dap.cfg"), "");
+    fs.writeFileSync(path.join(scripts, "target", "geehy", "apm32f4x.cfg"), "");
+    fs.mkdirSync(bin, { recursive: true });
     if (process.platform === "win32") {
-        const file = path.join(dir, "fake-openocd.cmd");
-        fs.writeFileSync(file, "@echo off\r\necho ARGS:%*\r\necho EP_VERIFY OK\r\nexit /b 0\r\n");
+        const file = path.join(bin, "fake-openocd.cmd");
+        fs.writeFileSync(file, "@echo off\r\necho Open On-Chip Debugger 0.12.0\r\necho ARGS:%*\r\necho EP_VERIFY OK\r\nexit /b 0\r\n");
         return file;
     }
-    const file = path.join(dir, "fake-openocd.sh");
-    fs.writeFileSync(file, "#!/bin/sh\necho \"ARGS:$@\"\necho \"EP_VERIFY OK\"\nexit 0\n");
+    const file = path.join(bin, "fake-openocd.sh");
+    fs.writeFileSync(file, "#!/bin/sh\necho \"Open On-Chip Debugger 0.12.0\"\necho \"ARGS:$@\"\necho \"EP_VERIFY OK\"\nexit 0\n");
     fs.chmodSync(file, 0o755);
     return file;
 }
@@ -36,6 +44,10 @@ function lastJsonLine(stdout) {
 }
 
 (async () => {
+    assert.strictEqual(flashCommon.parseOpenOcdVersion("Open On-Chip Debugger 0.11.0-rc2"), "0.11.0-rc2");
+    assert.strictEqual(flashCommon.parseOpenOcdVersion("xPack OpenOCD 0.12.0-7"), "0.12.0-7");
+    assert.strictEqual(flashCommon.checkOpenOcdVersion("0.11.0").compatible, false);
+    assert.strictEqual(flashCommon.checkOpenOcdVersion("0.12.0-7").compatible, true);
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-flash-skills-"));
     const elf = path.join(root, "firmware.elf");
     fs.writeFileSync(elf, "test firmware");
@@ -63,6 +75,10 @@ function lastJsonLine(stdout) {
         assert.strictEqual(downloadPreflight.target, "geehy/apm32f4x.cfg");
         assert.strictEqual(downloadPreflight.probe, "cmsis-dap.cfg");
         assert.strictEqual(downloadPreflight.openocd, fakeOpenOcd);
+        if (canRunFakeOpenOcd) {
+            assert.strictEqual(downloadPreflight.openocdVersion, "0.12.0");
+            assert.strictEqual(downloadPreflight.openocdCompatible, true);
+        }
         assert.strictEqual(downloadPreflight.ready, true);
         assert.ok(/^[0-9a-f]{64}$/.test(downloadPreflight.elfSha256));
 
@@ -72,14 +88,26 @@ function lastJsonLine(stdout) {
         assert.strictEqual(verifyPreflight.openocd, fakeOpenOcd);
 
         if (canRunFakeOpenOcd) {
-            const verified = lastJsonLine((await run("mcu-flash-verify/scripts/verify.js", ["--execute"])).stdout);
+            const verifyRun = await run("mcu-flash-verify/scripts/verify.js", ["--execute"]);
+            const verified = lastJsonLine(verifyRun.stdout);
             assert.strictEqual(verified.verified, true);
             assert.strictEqual(verified.elf, elf);
             assert.strictEqual(verified.elfSha256, downloadPreflight.elfSha256);
+            assert.ok(verifyRun.stdout.includes("-work-area-size 0"), "verify should force host-side comparison without target work-area");
 
             const downloaded = await run("mcu-download/scripts/download.js", ["--execute"]);
             assert.ok(downloaded.stdout.includes("verify reset exit"), "OpenOCD should receive the program command");
+            assert.ok(downloaded.stdout.includes("-work-area-backup 1"), "download should preserve target RAM used as work-area");
             assert.ok(downloaded.stdout.includes("EP_VERIFY OK"));
+
+            const oldOpenOcd = path.join(root, "bin", "old-openocd.sh");
+            fs.writeFileSync(oldOpenOcd, "#!/bin/sh\necho \"Open On-Chip Debugger 0.11.0\"\nexit 0\n");
+            fs.chmodSync(oldOpenOcd, 0o755);
+            await assert.rejects(
+                run("mcu-download/scripts/download.js", ["--execute", "--openocd", oldOpenOcd]),
+                error => /Incompatible OpenOCD 0\.11\.0/.test(error.stderr || ""),
+                "Agent download must refuse OpenOCD 0.11"
+            );
         }
 
         // bridge 不可用时降级为工作区自动检测；大写扩展名的 ELF 也必须被发现（Linux 大小写敏感）

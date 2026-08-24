@@ -47,8 +47,7 @@ class OpenOcdStatusService {
             if (!resolved && this.status.state === "installing") await this.refresh(false);
             return resolved;
         }
-        const resolved = await this.checker.pickOpenOcdPath(this.vscode, report, this.getLang());
-        if (!resolved) await this.refresh(false);
+        const resolved = await this.checker.pickOpenOcdPath(this.vscode, this.context, report, this.getLang());
         return resolved;
     }
 
@@ -57,7 +56,7 @@ class OpenOcdStatusService {
         const report = this.reporter(operation);
         const target = executable && String(executable).trim();
         const cached = this.checker.getCachedResult();
-        if (cached && cached.found && (cached.requested || cached.path) === target) {
+        if (this.checker.isCompatibleResult(cached) && (cached.requested || cached.path) === target) {
             report({
                 state: "ready",
                 key: cached.version ? "oc.readyVer" : "oc.ready",

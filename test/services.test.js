@@ -214,6 +214,9 @@ const { AgentOrchestrator } = require("../src/services/agentOrchestrator");
             getCachedResult() {
                 return this.cached;
             },
+            isCompatibleResult(result) {
+                return Boolean(result?.found && Number.parseFloat(result.version) >= 0.12);
+            },
             resolveOpenOcdStatus: async (_target, _context, result, report) => {
                 report({ state: "ready", result });
                 return result.path;
@@ -236,7 +239,7 @@ const { AgentOrchestrator } = require("../src/services/agentOrchestrator");
         checker.pickOpenOcdPath = async () => "/picked/openocd";
         assert.strictEqual(await statusService.handleAction("install"), "/bundled/openocd");
         assert.strictEqual(await statusService.handleAction("select"), "/picked/openocd");
-        checker.cached = { found: true, path: "old", requested: "old" };
+        checker.cached = { found: true, path: "old", requested: "old", version: "0.12.0" };
         assert.strictEqual(await statusService.resolve("new-openocd"), "new-openocd");
 
         const skillEvents = [];

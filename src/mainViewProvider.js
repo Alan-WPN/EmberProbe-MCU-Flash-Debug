@@ -385,7 +385,7 @@ class MainViewProvider {
                 // 修复类型错误：处理 undefined 情况，用空字符串兜底
                 elfPath = cleanWindowsPath(elfPath);
                 svdPath = cleanWindowsPath(svdPath || ''); // 关键修复：解决 svdPath 可能为 undefined 的问题
-                const { folder: workspaceFolder, cwd } = this._commandContext(resource);
+                const { folder: workspaceFolder } = this._commandContext(resource);
                 if (!workspaceFolder) {
                     vscode.window.showErrorMessage(this._t('msg.openWorkspaceForDebug'));
                     return false;
@@ -394,17 +394,24 @@ class MainViewProvider {
                 const configuredOpenOcdPath = vscode.workspace.getConfiguration('emberprobe').get('openocdPath', 'openocd');
                 const openocdPath = await this._resolveOpenOcdPath(configuredOpenOcdPath);
                 if (!openocdPath) return false;
+                const launch = openocdScripts.resolveOpenOcdLaunch(openocdPath, debuggerCfg, mcuCore);
                 const debugConfig = {
                     type: 'cortex-debug',
                     name: this._t('msg.debugConfigName'),
                     request: 'launch',
-                    cwd,
+                    // OpenOCD 的 find 会优先搜索 cwd；使用可信 scripts 目录，避免工作区伪造同名 Tcl/cfg。
+                    cwd: launch.cwd,
                     executable: elfPath,
                     servertype: 'openocd',
-                    serverpath: openocdPath,
+                    serverpath: launch.executable,
+                    searchDir: [launch.scriptsRoot],
                     configFiles: [
-                        `interface/${debuggerCfg}`,
-                        `target/${mcuCore}`
+                        launch.probePath,
+                        launch.targetPath
+                    ],
+                    // Cortex-Debug 也会调用 OpenOCD 的 flash 算法，保留 work-area 但开启备份恢复。
+                    openOCDLaunchCommands: [
+                        'foreach _ep_target [target names] { $_ep_target configure -work-area-backup 1 }'
                     ],
                     svdFile: svdPath || undefined
                 };
@@ -877,10 +884,9 @@ class MainViewProvider {
     // 会话内写入执行核心：写前读取 → 写入 → 回读校验，Agent 与侧边栏 UI 写入共用。
     async _executeWritePlan(session, source, plan) {
         const { elfResult, items } = plan;
-        const readItems = items.map(i => ({ name: i.name, address: i.address, size: i.size }));
-        const before = new Map((await session.readOnce(readItems)).map(s => [s.name, s]));
-        await session.writeOnce(items.map(i => ({ address: i.address, bytes: i.bytes })));
-        const after = new Map((await session.readOnce(readItems)).map(s => [s.name, s]));
+        const transaction = await session.writeAndVerify(items.map(i => ({ name: i.name, address: i.address, bytes: i.bytes })));
+        const before = new Map(transaction.before.map(s => [s.name, s]));
+        const after = new Map(transaction.after.map(s => [s.name, s]));
         const results = items.map(i => {
             const prev = before.get(i.name);
             const post = after.get(i.name);
@@ -900,7 +906,11 @@ class MainViewProvider {
             };
         });
         if (results.some(r => !r.verified)) {
-            throw Object.assign(new Error('Write verification failed: the value read back does not match (the firmware may be overwriting this variable)'), { code: 'WRITE_VERIFY_FAILED', retryable: true, details: { results } });
+            throw Object.assign(new Error('Write verification failed while the target was halted: the value read back does not match (check RAM accessibility, MPU/cache configuration, and debug transport)'), {
+                code: 'WRITE_VERIFY_FAILED',
+                retryable: true,
+                details: { results, targetHaltedDuringWrite: true, alignedWordWrites: true }
+            });
         }
         return { source, elf: elfResult.elf, results };
     }

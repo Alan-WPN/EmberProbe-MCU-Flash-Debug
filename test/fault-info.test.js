@@ -72,7 +72,14 @@ assert.strictEqual(decodeFaultRegisters({ cfsr: 0, icsr: 15 }).exception.name, "
         const os = require("os");
         const path = require("path");
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-fault-"));
-        const fake = path.join(dir, "fake-openocd.sh");
+        const bin = path.join(dir, "bin");
+        const scripts = path.join(dir, "openocd", "scripts");
+        fs.mkdirSync(path.join(scripts, "interface"), { recursive: true });
+        fs.mkdirSync(path.join(scripts, "target"), { recursive: true });
+        fs.mkdirSync(bin, { recursive: true });
+        fs.writeFileSync(path.join(scripts, "interface", "cmsis-dap.cfg"), "");
+        fs.writeFileSync(path.join(scripts, "target", "stm32f4x.cfg"), "");
+        const fake = path.join(bin, "fake-openocd.sh");
         fs.writeFileSync(fake, [
             "#!/bin/sh",
             "if printf '%s' \"$*\" | grep -q 'echo \\[reg pc\\]'; then",

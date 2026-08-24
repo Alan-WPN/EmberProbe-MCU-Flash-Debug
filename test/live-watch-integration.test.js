@@ -23,19 +23,22 @@ const { FakeOpenOcdServer } = require("./helpers/fake-openocd-server");
         ]);
         assert.deepStrictEqual(
             fake.commands.filter(command => command.includes("read_memory")),
-            ["ocd_read_memory 0x20000000 8 6"],
+            ["ocd_read_memory 0x20000000 16 3"],
             "contiguous variables should be read in one Tcl command"
         );
 
-        const written = await session.writeOnce([
-            { address: 0x20000001, bytes: [0xaa, 0xbb] }
+        const transaction = await session.writeAndVerify([
+            { name: "pair", address: 0x20000001, bytes: [0xaa, 0xbb] }
         ]);
-        assert.strictEqual(written, 1);
+        assert.deepStrictEqual(transaction.before[0].bytes, [2, 3]);
+        assert.deepStrictEqual(transaction.after[0].bytes, [0xaa, 0xbb]);
         assert.deepStrictEqual(fake.bytes(0x20000000, 4), [1, 0xaa, 0xbb, 4]);
         assert.ok(
-            fake.commands.includes("ocd_write_memory 0x20000001 8 {0xaa 0xbb}"),
-            "write command should contain the expected address and bytes"
+            fake.commands.includes("ocd_write_memory 0x20000000 32 {0x4bbaa01}"),
+            "unaligned byte changes should use a preserving aligned word write"
         );
+        assert.deepStrictEqual(fake.commands.filter(command => command === "halt" || command === "resume"), ["halt", "resume"]);
+        assert.strictEqual(fake.state, "running", "write transaction should restore the target run state");
     } finally {
         session.stop();
         await fake.stop();

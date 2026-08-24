@@ -1,6 +1,7 @@
 "use strict";
 
 const { spawn } = require("child_process");
+const { resolveOpenOcdLaunch } = require("../openocdScripts");
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
@@ -22,7 +23,13 @@ function normalizeSpawnError(error, executable) {
 // resolve { exitCode, openocdTail, commands }；OpenOCD 非零退出码由业务层结合解析结果判定。
 function runOpenOcdOnce(options) {
     const commands = options.buildCommands();
-    const args = ["-f", `interface/${options.probe}`, "-f", `target/${options.target}`];
+    let launch;
+    try {
+        launch = (options.resolveLaunch || resolveOpenOcdLaunch)(options.executable, options.probe, options.target);
+    } catch (error) {
+        return Promise.reject(error);
+    }
+    const args = ["-s", launch.scriptsRoot, "-f", launch.probePath, "-f", launch.targetPath];
     for (const command of commands) args.push("-c", command);
     const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 15000;
     const tailLimit = Number(options.tailLimit) > 0 ? Number(options.tailLimit) : 20;
@@ -31,13 +38,13 @@ function runOpenOcdOnce(options) {
     return new Promise((resolve, reject) => {
         let child;
         try {
-            child = spawnImpl(options.executable, args, {
-                cwd: options.cwd,
+            child = spawnImpl(launch.executable, args, {
+                cwd: launch.cwd,
                 windowsHide: true,
                 shell: false
             });
         } catch (error) {
-            reject(normalizeSpawnError(error, options.executable));
+            reject(normalizeSpawnError(error, launch.executable));
             return;
         }
 
@@ -80,7 +87,7 @@ function runOpenOcdOnce(options) {
 
         child.stdout.on("data", consume);
         child.stderr.on("data", consume);
-        child.on("error", (error) => finish(normalizeSpawnError(error, options.executable)));
+        child.on("error", (error) => finish(normalizeSpawnError(error, launch.executable)));
         child.on("close", (code) => {
             if (pending) {
                 handleLine(pending);

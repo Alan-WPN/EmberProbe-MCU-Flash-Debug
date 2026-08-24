@@ -16,6 +16,16 @@ function fakeChild() {
     return child;
 }
 
+function resolver(executable = "openocd") {
+    return () => ({
+        executable,
+        scriptsRoot: "/trusted/openocd/scripts",
+        cwd: "/trusted/openocd/scripts",
+        probePath: "/trusted/openocd/scripts/interface/cmsis-dap.cfg",
+        targetPath: "/trusted/openocd/scripts/target/stm32f4x.cfg"
+    });
+}
+
 (async () => {
     // stdout/stderr 共享正则拆行；ANSI/CR 在进入业务回调前统一清理。
     const lines = [];
@@ -28,6 +38,7 @@ function fakeChild() {
         cwd: "/tmp",
         timeoutMs: 1000,
         buildCommands: () => ["init", "shutdown"],
+        resolveLaunch: resolver(),
         onLine: line => lines.push(line),
         spawnImpl: (_file, args) => {
             capturedArgs = args;
@@ -45,7 +56,9 @@ function fakeChild() {
     assert.deepStrictEqual(completed.openocdTail, lines);
     assert.strictEqual(completed.exitCode, 0);
     assert.deepStrictEqual(capturedArgs, [
-        "-f", "interface/cmsis-dap.cfg", "-f", "target/stm32f4x.cfg",
+        "-s", "/trusted/openocd/scripts",
+        "-f", "/trusted/openocd/scripts/interface/cmsis-dap.cfg",
+        "-f", "/trusted/openocd/scripts/target/stm32f4x.cfg",
         "-c", "init", "-c", "shutdown"
     ]);
 
@@ -57,6 +70,7 @@ function fakeChild() {
             probe: "p.cfg",
             target: "t.cfg",
             buildCommands: () => [],
+            resolveLaunch: resolver("/missing/openocd"),
             spawnImpl: () => { throw enoent; }
         }),
         error => error.i18nKey === "run.notFound" && error.i18nParams.path === "/missing/openocd"
@@ -68,6 +82,7 @@ function fakeChild() {
             probe: "p.cfg",
             target: "t.cfg",
             buildCommands: () => [],
+            resolveLaunch: resolver("/missing/openocd"),
             spawnImpl: () => {
                 process.nextTick(() => errorChild.emit("error", enoent));
                 return errorChild;
@@ -85,6 +100,7 @@ function fakeChild() {
             target: "t.cfg",
             timeoutMs: 10,
             buildCommands: () => ["init"],
+            resolveLaunch: resolver(),
             spawnImpl: () => timeoutChild
         }),
         error => error.code === "OPENOCD_TIMEOUT"

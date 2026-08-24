@@ -4,6 +4,7 @@
 const net = require("net");
 const { spawn } = require("child_process");
 const { isSafeCfg, diagnoseOpenOcdFailure } = require("./openocdRunner");
+const { resolveOpenOcdLaunch } = require("./openocdScripts");
 const { clampInteger } = require("./validation");
 
 const SUB = "\x1a"; // Tcl-RPC 命令/响应分帧符 0x1A
@@ -37,6 +38,48 @@ function parseMemoryValues(text) {
         if (Number.isInteger(n) && n >= 0 && n <= 255) out.push(n);
     }
     return out;
+}
+
+function parseMemoryElements(text, widthBits) {
+    if (!text) return [];
+    const max = widthBits === 32 ? 0xffffffff : widthBits === 16 ? 0xffff : 0xff;
+    const cleaned = String(text).replace(/\x1a/g, ' ').replace(/(^|\s)(0x)?[0-9a-fA-F]+:/g, ' ');
+    const out = [];
+    for (const tok of cleaned.trim().split(/\s+/)) {
+        if (!tok) continue;
+        let n;
+        if (/^0x[0-9a-fA-F]+$/i.test(tok)) n = parseInt(tok, 16);
+        else if (/^[0-9a-fA-F]*[a-f][0-9a-fA-F]*$/i.test(tok)) n = parseInt(tok, 16);
+        else if (/^-?[0-9]+$/.test(tok)) n = parseInt(tok, 10);
+        else continue;
+        if (Number.isInteger(n) && n < 0 && n >= -(2 ** (widthBits - 1))) n += 2 ** widthBits;
+        if (Number.isInteger(n) && n >= 0 && n <= max) out.push(n >>> 0);
+    }
+    return out;
+}
+
+function transferShape(address, byteCount) {
+    if ((address & 3) === 0 && byteCount % 4 === 0) return { widthBits: 32, elementBytes: 4, count: byteCount / 4 };
+    if ((address & 1) === 0 && byteCount % 2 === 0) return { widthBits: 16, elementBytes: 2, count: byteCount / 2 };
+    return { widthBits: 8, elementBytes: 1, count: byteCount };
+}
+
+function bytesToElements(bytes, elementBytes) {
+    const elements = [];
+    for (let offset = 0; offset < bytes.length; offset += elementBytes) {
+        let value = 0;
+        for (let index = 0; index < elementBytes; index++) value += (bytes[offset + index] & 0xff) * (2 ** (index * 8));
+        elements.push(value >>> 0);
+    }
+    return elements;
+}
+
+function elementsToBytes(elements, elementBytes) {
+    const bytes = [];
+    for (const element of elements) {
+        for (let index = 0; index < elementBytes; index++) bytes.push((element >>> (index * 8)) & 0xff);
+    }
+    return bytes;
 }
 
 // 复用 openocdRunner 的配置名白名单校验
@@ -92,9 +135,17 @@ class LiveWatchSession {
         }
         const port = clampInteger(this.options.port, 6666, 1, 65535);
         const interval = clampInteger(this.options.intervalMs, 100, 20, 10000);
+        if (/(^|\/)gd32vf103\.cfg$/i.test(this.options.target)) {
+            throw Object.assign(new Error('GD32VF103 在 CPU 运行时不支持调试器内存访问，无法启用非侵入实时变量'), {
+                code: 'LIVE_MEMORY_UNSUPPORTED'
+            });
+        }
+        const launch = resolveOpenOcdLaunch(this.options.executable, this.options.probe, this.options.target);
         const args = [
-            '-f', `interface/${this.options.probe}`,
-            '-f', `target/${this.options.target}`,
+            '-s', launch.scriptsRoot,
+            '-f', launch.probePath,
+            '-f', launch.targetPath,
+            '-c', 'bindto 127.0.0.1',
             '-c', `tcl_port ${port}`,
             '-c', 'gdb_port disabled',
             '-c', 'telnet_port disabled',
@@ -102,7 +153,7 @@ class LiveWatchSession {
         ];
         this._status({ key: 'lw.connecting' });
         try {
-            this.child = spawn(this.options.executable, args, { cwd: this.options.cwd, windowsHide: true, shell: false });
+            this.child = spawn(launch.executable, args, { cwd: launch.cwd, windowsHide: true, shell: false });
         } catch (error) {
             throw error.code === 'ENOENT' ? Object.assign(new Error(`找不到 OpenOCD：${this.options.executable}`), { i18nKey: 'run.notFound', i18nParams: { path: this.options.executable } }) : new Error(error.message);
         }
@@ -281,23 +332,37 @@ class LiveWatchSession {
         });
     }
 
-    // 读取内存字节（width=8），返回 number[] 或 null；主用 ocd_read_memory，不可用时回退 read_memory
+    async _sendCheckedCommand(cmd) {
+        const wrapped = `set _ep_rc [catch {${cmd}} _ep_msg]; if {$_ep_rc} {set _ep_out "EP_ERR:\${_ep_msg}"} else {set _ep_out "EP_OK:\${_ep_msg}"}; set _ep_out`;
+        const response = String(await this._sendCommand(wrapped) || '').replace(/\x1a/g, '');
+        if (response.startsWith('EP_OK:')) return response.slice(6);
+        if (response.startsWith('EP_ERR:')) {
+            throw Object.assign(new Error(response.slice(7).trim() || `OpenOCD 命令失败：${cmd}`), { code: 'OPENOCD_TCL_ERROR' });
+        }
+        throw Object.assign(new Error(`OpenOCD 返回了无法识别的 Tcl 响应：${response.slice(0, 200)}`), { code: 'OPENOCD_TCL_PROTOCOL_ERROR' });
+    }
+
+    // 按地址/长度选择 32/16/8 bit 传输，再统一解包为小端字节。
     async _readMemoryBytes(addr, count) {
         const hex = '0x' + (addr >>> 0).toString(16);
-        const build = (cmd) => `${cmd} ${hex} 8 ${count}`;
-        let resp = await this._sendCommand(build(this.readCmd));
-        let vals = parseMemoryValues(resp);
-        if (vals.length < count && !this.altTried) {
-            this.altTried = true; // 首次读取失败时切换命令名并锁定
-            this.readCmd = this.readCmd === 'ocd_read_memory' ? 'read_memory' : 'ocd_read_memory';
-            resp = await this._sendCommand(build(this.readCmd));
-            vals = parseMemoryValues(resp);
+        const shape = transferShape(addr, count);
+        const build = (cmd) => `${cmd} ${hex} ${shape.widthBits} ${shape.count}`;
+        let resp;
+        try {
+            resp = await this._sendCheckedCommand(build(this.readCmd));
+        } catch (error) {
+            if (!this.altTried && /invalid command name|unknown command/i.test(error.message)) {
+                this.altTried = true;
+                this.readCmd = this.readCmd === 'ocd_read_memory' ? 'read_memory' : 'ocd_read_memory';
+                resp = await this._sendCheckedCommand(build(this.readCmd));
+            } else throw error;
         }
-        if (vals.length < count) {
-            this._lastReadError = (resp || '').replace(/\x1a/g, '').trim().slice(0, 200);
+        const values = parseMemoryElements(resp, shape.widthBits);
+        if (values.length < shape.count) {
+            this._lastReadError = String(resp || '').trim().slice(0, 200);
             return null;
         }
-        return vals.slice(0, count);
+        return elementsToBytes(values.slice(0, shape.count), shape.elementBytes).slice(0, count);
     }
 
     async _readItems(items, t) {
@@ -342,23 +407,79 @@ class LiveWatchSession {
         }
     }
 
-    // 写入内存字节（width=8）；主用 ocd_write_memory，不可用时回退 write_memory。
-    // 写命令成功时返回空响应，含错误文本（invalid command / 地址错误）时视为失败。
+    // 变量写入统一转换为对齐的 32-bit 读-改-写。某些 Cortex-M7/AHB-AP 组合下
+    // debugger 的 byte-lane 写入会被丢弃；字写可避开该问题并保留相邻字节。
     async _writeMemoryBytes(addr, bytes) {
-        const hex = '0x' + (addr >>> 0).toString(16);
-        const data = bytes.map(b => '0x' + (b & 0xff).toString(16)).join(' ');
-        const build = (cmd) => `${cmd} ${hex} 8 {${data}}`;
-        const failed = (resp) => /invalid|error|fail|couldn't|wrong # args/i.test(String(resp || '').replace(/\x1a/g, ''));
-        let resp = await this._sendCommand(build(this.writeCmd));
-        if (failed(resp) && !this.writeAltTried) {
-            this.writeAltTried = true; // 首次失败时切换命令名并锁定
-            this.writeCmd = this.writeCmd === 'ocd_write_memory' ? 'write_memory' : 'ocd_write_memory';
-            resp = await this._sendCommand(build(this.writeCmd));
+        const address = addr >>> 0;
+        const input = Array.from(bytes || [], value => value & 0xff);
+        if (!input.length) return true;
+        const alignedStart = (address & 0xfffffffc) >>> 0;
+        const alignedEnd = Math.ceil((address + input.length) / 4) * 4;
+        let writeBytes = input;
+        if (alignedStart !== address || alignedEnd - alignedStart !== input.length) {
+            const existing = await this._readMemoryBytes(alignedStart, alignedEnd - alignedStart);
+            if (!existing) throw new Error('写入内存失败：无法读取相邻字节以执行 32 位对齐写入');
+            writeBytes = existing.slice();
+            writeBytes.splice(address - alignedStart, input.length, ...input);
         }
-        if (failed(resp)) {
-            throw new Error('写入内存失败：' + String(resp || '').replace(/\x1a/g, '').trim().slice(0, 200));
+        const hex = '0x' + alignedStart.toString(16);
+        const data = bytesToElements(writeBytes, 4).map(value => '0x' + value.toString(16)).join(' ');
+        const build = (cmd) => `${cmd} ${hex} 32 {${data}}`;
+        try {
+            await this._sendCheckedCommand(build(this.writeCmd));
+        } catch (error) {
+            if (!this.writeAltTried && /invalid command name|unknown command/i.test(error.message)) {
+                this.writeAltTried = true;
+                this.writeCmd = this.writeCmd === 'ocd_write_memory' ? 'write_memory' : 'ocd_write_memory';
+                try { await this._sendCheckedCommand(build(this.writeCmd)); }
+                catch (fallbackError) {
+                    throw Object.assign(new Error('写入内存失败：' + fallbackError.message), { cause: fallbackError });
+                }
+            } else {
+                throw Object.assign(new Error('写入内存失败：' + error.message), { cause: error });
+            }
         }
         return true;
+    }
+
+    async _waitUntilIdle(timeoutMs) {
+        const deadline = Date.now() + timeoutMs;
+        while (this.busy) {
+            if (Date.now() >= deadline) throw new Error('等待实时采样连接空闲超时');
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+    }
+
+    // 显式写入默认采用安全事务：记录状态、必要时短暂 halt、写前/写后读取，再恢复运行。
+    async writeAndVerify(items, timeoutMs = 5000) {
+        if (!Array.isArray(items) || !items.length) return { before: [], after: [] };
+        if (this.stopped || !this.socket || this.socket.destroyed) throw new Error('OpenOCD Tcl 服务未连接');
+        await this._waitUntilIdle(timeoutMs);
+        this.busy = true;
+        let haltedByUs = false;
+        let primaryError = null;
+        let result = null;
+        try {
+            const state = (await this._sendCheckedCommand('[target current] curstate')).trim();
+            if (state !== 'halted') {
+                await this._sendCheckedCommand('halt');
+                haltedByUs = true;
+            }
+            const readItems = items.map(item => ({ name: item.name, address: item.address, size: item.bytes.length }));
+            const before = (await this._readItems(readItems, Date.now())).samples;
+            for (const item of items) await this._writeMemoryBytes(item.address, item.bytes);
+            const after = (await this._readItems(readItems, Date.now())).samples;
+            result = { before, after };
+        } catch (error) {
+            primaryError = error;
+        }
+        if (haltedByUs) {
+            try { await this._sendCheckedCommand('resume'); }
+            catch (resumeError) { if (!primaryError) primaryError = resumeError; }
+        }
+        this.busy = false;
+        if (primaryError) throw primaryError;
+        return result;
     }
 
     // 在现有 Tcl 连接上写入一组变量一次（items: [{address, bytes}]），语义同 readOnce。
@@ -420,4 +541,13 @@ class LiveWatchSession {
     }
 }
 
-module.exports = { LiveWatchSession, parseMemoryValues, isSafeCfg, findFreePort };
+module.exports = {
+    LiveWatchSession,
+    parseMemoryValues,
+    parseMemoryElements,
+    transferShape,
+    bytesToElements,
+    elementsToBytes,
+    isSafeCfg,
+    findFreePort
+};

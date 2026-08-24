@@ -13,11 +13,34 @@ function isSafeCfgPath(value) {
     return parts.length > 0 && parts.every(part => part && part !== "." && part !== "..");
 }
 
-function scriptsRootCandidates(executable) {
+function resolveExecutablePath(executable) {
     const configured = String(executable || "").trim();
-    if (!configured || (!configured.includes("/") && !configured.includes("\\"))) return [];
-    let binary = path.resolve(configured);
-    try { binary = fs.realpathSync(binary); } catch (error) { /* use configured path */ }
+    if (!configured) return "";
+    if (configured.includes("/") || configured.includes("\\")) {
+        const absolute = path.resolve(configured);
+        try { return fs.realpathSync(absolute); } catch (error) { return absolute; }
+    }
+    const pathEntries = String(process.env.PATH || "").split(path.delimiter).filter(Boolean);
+    const extensions = process.platform === "win32"
+        ? String(process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)
+        : [""];
+    for (const entry of pathEntries) {
+        for (const extension of extensions) {
+            const candidate = path.join(entry, process.platform === "win32" && !path.extname(configured)
+                ? configured + extension.toLowerCase()
+                : configured);
+            try {
+                fs.accessSync(candidate, fs.constants.X_OK);
+                return fs.realpathSync(candidate);
+            } catch (error) { /* try the next PATH entry */ }
+        }
+    }
+    return configured;
+}
+
+function scriptsRootCandidates(executable) {
+    const binary = resolveExecutablePath(executable);
+    if (!binary || (!binary.includes("/") && !binary.includes("\\"))) return [];
     const prefix = path.dirname(path.dirname(binary));
     const candidates = [
         process.env.OPENOCD_SCRIPTS,
@@ -28,6 +51,47 @@ function scriptsRootCandidates(executable) {
         path.join(prefix, "share", "openocd", "scripts")
     ].filter(Boolean);
     return [...new Set(candidates.map(candidate => path.resolve(candidate)))];
+}
+
+function resolveConfigFile(scriptsRoot, kind, config) {
+    if (!isSafeCfgPath(config) || (kind !== "interface" && kind !== "target")) {
+        throw Object.assign(new Error(`非法的 OpenOCD ${kind} 配置名：${config}`), { code: "OPENOCD_CONFIG_INVALID" });
+    }
+    const base = fs.realpathSync(path.join(scriptsRoot, kind));
+    const candidate = path.join(base, ...config.split("/"));
+    let resolved;
+    try { resolved = fs.realpathSync(candidate); }
+    catch (error) {
+        throw Object.assign(new Error(`OpenOCD 配置脚本不存在：${kind}/${config}`), {
+            code: "OPENOCD_CONFIG_NOT_FOUND",
+            details: { candidate }
+        });
+    }
+    const relative = path.relative(base, resolved);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+        throw Object.assign(new Error(`OpenOCD 配置脚本越界：${kind}/${config}`), { code: "OPENOCD_CONFIG_INVALID" });
+    }
+    return resolved;
+}
+
+// OpenOCD 会优先从 cwd 查找相对脚本。所有启动入口都应该使用这个解析结果，
+// 并以 scriptsRoot 作为 OpenOCD 的 cwd，防止工作区中的 target/ / interface/ / mem_helper.tcl 遮蔽官方脚本。
+function resolveOpenOcdLaunch(executable, probe, target) {
+    const resolvedExecutable = resolveExecutablePath(executable);
+    const scriptsRoot = findScriptsRoot(resolvedExecutable);
+    if (!scriptsRoot) {
+        throw Object.assign(new Error(`无法定位与 OpenOCD 匹配的 scripts 目录：${executable}`), {
+            code: "OPENOCD_SCRIPTS_NOT_FOUND"
+        });
+    }
+    const canonicalRoot = fs.realpathSync(scriptsRoot);
+    return {
+        executable: resolvedExecutable,
+        scriptsRoot: canonicalRoot,
+        cwd: canonicalRoot,
+        probePath: resolveConfigFile(canonicalRoot, "interface", probe),
+        targetPath: resolveConfigFile(canonicalRoot, "target", target)
+    };
 }
 
 function findScriptsRoot(executable) {
@@ -61,4 +125,12 @@ function discoverTargetConfigs(executable) {
         .sort((a, b) => a.localeCompare(b, "en", { numeric: true, sensitivity: "base" }));
 }
 
-module.exports = { isSafeCfgPath, scriptsRootCandidates, findScriptsRoot, discoverTargetConfigs };
+module.exports = {
+    isSafeCfgPath,
+    resolveExecutablePath,
+    scriptsRootCandidates,
+    findScriptsRoot,
+    resolveConfigFile,
+    resolveOpenOcdLaunch,
+    discoverTargetConfigs
+};

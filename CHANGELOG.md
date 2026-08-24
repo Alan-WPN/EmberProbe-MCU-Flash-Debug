@@ -8,7 +8,16 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ### Fixed
 
+- OpenOCD 环境检查新增最低版本门禁（`>= 0.12.0`）：0.11.x、0.12.0 RC 或无法识别版本的构建不再进入下载、调试、实时读写和 Agent Flash Skills；Windows x64 会引导一键切换到插件内置 xPack OpenOCD 0.12.0-7，其他平台显示升级与重新选择路径提示。
 - Flash Skills 跨平台测试在 macOS 上统一比较规范化真实路径，兼容系统将 `/var` 映射为 `/private/var`；常规 CI 仅在分支推送和 Pull Request 上运行，发布标签由 Release 工作流独立验证，避免同一标签重复执行整套门禁。
+- OpenOCD 0.12 的 `verify_image` 在 STM32H7/F4 等 target 上会使用 `backup=0` 的 RAM work-area，可覆盖与之重叠的 `.data/.bss`；独立校验现在禁用 target work-area 并回退为主机侧比对，下载与 Cortex-Debug 则对所有 target 开启 work-area 备份恢复。
+- Cortex-M7 等目标的小字节变量写入改为对齐 32 位读-改-写，并在短暂 halt 期间执行写前/写后回读、严格 Tcl 错误判定和原运行状态恢复，避免 byte-lane 写入被丢弃后误报通信成功。
+- 已知运行时无法通过调试器访问内存的 GD32VF103 现在会在启动非侵入实时采样前明确拒绝，不再循环报“读取内存失败”。
+
+### Security
+
+- 所有插件和 Agent Skill 的 OpenOCD 启动入口现在都解析可执行文件及 scripts/cfg 的规范真实路径，使用绝对 `-f`/`-s` 并从可信 scripts 目录启动，防止工作区中的同名 `target/`/`interface/`/Tcl 文件被 OpenOCD 优先加载执行。
+- 一次性下载/校验和 Agent Skill 增加有界超时，避免 OpenOCD 或探针异常时任务无限挂起。
 
 ## [0.6.3] - 2026-08-24
 

@@ -10,6 +10,7 @@ class FakeOpenOcdServer {
         this.commands = [];
         this.memory = new Map();
         this.sockets = new Set();
+        this.state = "running";
     }
 
     seed(address, bytes) {
@@ -45,25 +46,53 @@ class FakeOpenOcdServer {
     }
 
     _handle(socket, command) {
+        const prefix = "set _ep_rc [catch {";
+        const suffix = "} _ep_msg]";
+        if (command.startsWith(prefix)) {
+            const boundary = command.indexOf(suffix, prefix.length);
+            if (boundary >= 0) {
+                const inner = command.slice(prefix.length, boundary);
+                const result = this._execute(inner);
+                socket.write((result.ok ? "EP_OK:" : "EP_ERR:") + result.response + SUB);
+                return;
+            }
+        }
+        const result = this._execute(command);
+        socket.write(result.response + SUB);
+    }
+
+    _execute(command) {
         this.commands.push(command);
-        const read = command.match(/^(?:ocd_)?read_memory\s+(0x[0-9a-f]+)\s+8\s+(\d+)$/i);
+        const read = command.match(/^(?:ocd_)?read_memory\s+(0x[0-9a-f]+)\s+(8|16|32)\s+(\d+)$/i);
         if (read) {
-            const values = this.bytes(parseInt(read[1], 16), Number(read[2]));
-            socket.write(values.join(" ") + SUB);
-            return;
+            const elementBytes = Number(read[2]) / 8;
+            const raw = this.bytes(parseInt(read[1], 16), Number(read[3]) * elementBytes);
+            const values = [];
+            for (let offset = 0; offset < raw.length; offset += elementBytes) {
+                let value = 0;
+                for (let index = 0; index < elementBytes; index++) value += raw[offset + index] * (2 ** (index * 8));
+                values.push("0x" + (value >>> 0).toString(16));
+            }
+            return { ok: true, response: values.join(" ") };
         }
-        const write = command.match(/^(?:ocd_)?write_memory\s+(0x[0-9a-f]+)\s+8\s+\{([^}]*)\}$/i);
+        const write = command.match(/^(?:ocd_)?write_memory\s+(0x[0-9a-f]+)\s+(8|16|32)\s+\{([^}]*)\}$/i);
         if (write) {
-            const values = write[2].trim().split(/\s+/).filter(Boolean).map(value => parseInt(value, 16));
+            const elementBytes = Number(write[2]) / 8;
+            const elements = write[3].trim().split(/\s+/).filter(Boolean).map(value => Number.parseInt(value, 0) >>> 0);
+            const values = [];
+            for (const element of elements) {
+                for (let index = 0; index < elementBytes; index++) values.push((element >>> (index * 8)) & 0xff);
+            }
             this.seed(parseInt(write[1], 16), values);
-            socket.write(SUB);
-            return;
+            return { ok: true, response: "" };
         }
+        if (command === "[target current] curstate") return { ok: true, response: this.state };
+        if (command === "halt") { this.state = "halted"; return { ok: true, response: "" }; }
+        if (command === "resume") { this.state = "running"; return { ok: true, response: "" }; }
         if (command === "shutdown") {
-            socket.write(SUB);
-            return;
+            return { ok: true, response: "" };
         }
-        socket.write("invalid command" + SUB);
+        return { ok: false, response: `invalid command name "${command.split(/\s+/)[0]}"` };
     }
 
     async connect() {

@@ -23,7 +23,9 @@ Override detection with `--elf`, `--target`, `--probe`, or `--openocd` when need
 
 ## Behavior
 
-- Verification is read-only for the flash, but the core must be halted while comparing: the script halts, runs `verify_image`, then restores the original run state.
+- Verification is read-only for the flash, but the core must be halted while comparing: the script halts, runs `verify_image`, then restores the original run state. On OpenOCD 0.12 it disables the current target work-area before `init`, forcing host-side comparison so verification cannot overwrite `.data`/`.bss` RAM that overlaps a target configuration's work-area.
+- The OpenOCD executable, scripts root, interface config, and target config are resolved to canonical paths. OpenOCD runs from that trusted scripts directory so workspace files cannot shadow bundled `target/`, `interface/`, or helper Tcl scripts.
+- OpenOCD 0.12.0 or newer is required. Preflight reports `openocdVersion`, `openocdCompatible`, and `minimumOpenocdVersion`; do not execute verification when compatibility is false. Windows users can switch to EmberProbe's bundled xPack OpenOCD 0.12.0-7 from the extension's OpenOCD status card.
 - Do not run it while EmberProbe is sampling, downloading, or debugging — the probe can only be owned by one process (same rule as mcu-download).
 - The final JSON line contains `verified` (true/false), `elf`, and `elfSha256`. Exit code 0 means the flash matches the ELF; exit code 1 with `verified: false` means contents differ — report the mismatch detail line (e.g. checksum mismatch address) and suggest re-downloading with mcu-download.
 - OpenOCD connection errors (probe not found, target unpowered) surface as raw OpenOCD output; summarize the failing line for the user.

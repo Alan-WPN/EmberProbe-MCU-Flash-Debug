@@ -1,6 +1,6 @@
 "use strict";
 const { spawn } = require("child_process");
-const { isSafeCfgPath } = require("./openocdScripts");
+const { isSafeCfgPath, resolveOpenOcdLaunch } = require("./openocdScripts");
 
 // 配置路径白名单校验：允许 geehy/apm32f4x.cfg 等 scripts 内安全相对路径。
 function isSafeCfg(name) {
@@ -152,13 +152,18 @@ function runOpenOcd(vscode, options, onProgress) {
     if (!isSafeCfg(options.probe) || !isSafeCfg(options.target)) {
         return Promise.reject(new Error(`非法的 OpenOCD 配置名：${options.probe} / ${options.target}`));
     }
+    let launch;
+    try { launch = resolveOpenOcdLaunch(options.executable, options.probe, options.target); }
+    catch (error) { return Promise.reject(error); }
     return new Promise((resolve, reject) => {
         const { terminal, writeEmitter, created } = acquireTerminal(vscode);
         terminal.show(true);
         const elfPath = options.elf.replace(/\\/g, '/');
         // 关键修复：ELF 路径含空格时必须加引号，否则 OpenOCD 的 TCL 解析会把路径拆成多个参数
         const programCmd = `program ${quoteTclWord(elfPath)} verify reset exit`;
-        const args = ['-f', `interface/${options.probe}`, '-f', `target/${options.target}`, '-c', programCmd];
+        const preserveWorkArea = 'foreach _ep_target [target names] { $_ep_target configure -work-area-backup 1 }';
+        const args = ['-s', launch.scriptsRoot, '-f', launch.probePath, '-f', launch.targetPath,
+            '-c', preserveWorkArea, '-c', programCmd];
         // 终端不再镜像 OpenOCD 原始输出，只展示解析后的关键事件与最终结论
         const print = (text, color) => writeEmitter.fire((color || '') + text + '\x1b[0m\r\n');
         const printEvent = (event) => {
@@ -171,7 +176,7 @@ function runOpenOcd(vscode, options, onProgress) {
         print(`探针 ${options.probe} · 目标 ${options.target}\r\n`);
         onProgress({ stage: 'start', level: 'info', key: 'run.starting', message: '正在启动 OpenOCD' });
         let child;
-        try { child = spawn(options.executable, args, { cwd: options.cwd, windowsHide: true, shell: false }); sharedChild = child; }
+        try { child = spawn(launch.executable, args, { cwd: launch.cwd, windowsHide: true, shell: false }); sharedChild = child; }
         catch (error) {
             print(`✗ 启动 OpenOCD 失败：${error.message}`, '\x1b[31m');
             // 新建终端却启动失败时清理空终端；复用的终端保留历史输出
@@ -182,6 +187,15 @@ function runOpenOcd(vscode, options, onProgress) {
         let pending = '';
         let lastError = '';
         let spawnFailed = false;
+        let timedOut = false;
+        const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 120000;
+        const timeout = setTimeout(() => {
+            timedOut = true;
+            try { child.kill(); } catch (error) { /* process may already be exiting */ }
+            const timeoutError = Object.assign(new Error(`OpenOCD 下载超时（${timeoutMs}ms）`), { code: 'OPENOCD_TIMEOUT' });
+            print(`\r\n\x1b[1;31m✗ ${timeoutError.message}\x1b[0m`);
+            reject(timeoutError);
+        }, timeoutMs);
         const errors = [];
         const stats = { wrote: null, verified: null, probe: '', chip: '', deviceId: '', flashSize: '', clock: '' };
         const rawTail = [];
@@ -210,6 +224,8 @@ function runOpenOcd(vscode, options, onProgress) {
         child.stdout.on('data', consume);
         child.stderr.on('data', consume);
         child.on('error', error => {
+            clearTimeout(timeout);
+            if (timedOut) return;
             spawnFailed = true;
             const isEnoent = error.code === 'ENOENT';
             const message = isEnoent ? `找不到 OpenOCD：${options.executable}` : error.message;
@@ -219,9 +235,11 @@ function runOpenOcd(vscode, options, onProgress) {
             reject(error);
         });
         child.on('close', code => {
+            clearTimeout(timeout);
             if (sharedChild === child) sharedChild = null;
             if (pending) { flushLine(pending); pending = ''; }
             if (spawnFailed) return; // spawn 失败已由 error 事件处理
+            if (timedOut) return;
             if (code === 0) {
                 const elfName = elfPath.split('/').pop() || elfPath;
                 print('\r\n\x1b[1;32m✓ 固件下载并校验成功\x1b[0m');

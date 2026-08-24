@@ -8,6 +8,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { execFile, spawn } = require("child_process");
 const { call } = require("./agent-client");
+const MIN_OPENOCD_VERSION = "0.12.0";
 
 const TARGET_RULES = [
     ["apm32f0", "geehy/apm32f0x.cfg"], ["apm32f1", "geehy/apm32f1x.cfg"], ["apm32f4", "geehy/apm32f4x.cfg"],
@@ -143,6 +144,133 @@ function isSafeCfgPath(value) {
     return value.split("/").every(part => part && part !== "." && part !== "..");
 }
 
+function resolveExecutablePath(executable) {
+    const configured = String(executable || "").trim();
+    if (!configured) return "";
+    if (configured.includes("/") || configured.includes("\\")) {
+        const absolute = path.resolve(configured);
+        try { return fs.realpathSync(absolute); } catch { return absolute; }
+    }
+    const extensions = process.platform === "win32"
+        ? String(process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)
+        : [""];
+    for (const entry of String(process.env.PATH || "").split(path.delimiter).filter(Boolean)) {
+        for (const extension of extensions) {
+            const candidate = path.join(entry, process.platform === "win32" && !path.extname(configured)
+                ? configured + extension.toLowerCase()
+                : configured);
+            try { fs.accessSync(candidate, fs.constants.X_OK); return fs.realpathSync(candidate); }
+            catch { /* try next PATH entry */ }
+        }
+    }
+    return configured;
+}
+
+function parseOpenOcdVersion(text) {
+    const value = String(text || "");
+    const match = value.match(/open on-chip debugger\s+v?(\d+\.\d+(?:\.\d+)?(?:[-+.\w]*)?)/i);
+    if (match) return match[1];
+    const fallback = value.match(/openocd[^\d]*v?(\d+\.\d+(?:\.\d+)?(?:[-+.\w]*)?)/i);
+    return fallback ? fallback[1] : "";
+}
+
+function checkOpenOcdVersion(version) {
+    const parse = value => {
+        const match = String(value || "").match(/^(\d+)\.(\d+)(?:\.(\d+))?/);
+        return match ? [Number(match[1]), Number(match[2]), Number(match[3] || 0)] : null;
+    };
+    const actual = parse(version);
+    const minimum = parse(MIN_OPENOCD_VERSION);
+    if (!actual) return { compatible: false, reason: "unknown", minimumVersion: MIN_OPENOCD_VERSION };
+    let comparison = 0;
+    for (let index = 0; index < 3; index++) {
+        if (actual[index] !== minimum[index]) { comparison = actual[index] < minimum[index] ? -1 : 1; break; }
+    }
+    const prerelease = comparison === 0 && /-(?:rc|alpha|beta|pre(?:view)?)[.\d-]*/i.test(String(version));
+    return {
+        compatible: comparison > 0 || (comparison === 0 && !prerelease),
+        reason: comparison < 0 || prerelease ? "too_old" : "",
+        minimumVersion: MIN_OPENOCD_VERSION
+    };
+}
+
+function probeOpenOcdCompatibility(executable, timeoutMs = 5000) {
+    const binary = resolveExecutablePath(executable);
+    return new Promise(resolve => {
+        let child;
+        try { child = spawn(binary, ["--version"], { windowsHide: true, shell: false }); }
+        catch (error) {
+            resolve({ found: false, path: binary, version: "", compatible: false, minimumVersion: MIN_OPENOCD_VERSION, error: error.message });
+            return;
+        }
+        let output = "";
+        let settled = false;
+        const finish = result => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(result);
+        };
+        const timer = setTimeout(() => {
+            try { child.kill(); } catch { /* already exited */ }
+            finish({ found: false, path: binary, version: "", compatible: false, minimumVersion: MIN_OPENOCD_VERSION, error: "OpenOCD version check timed out" });
+        }, timeoutMs);
+        child.stdout.on("data", chunk => { output += chunk.toString(); });
+        child.stderr.on("data", chunk => { output += chunk.toString(); });
+        child.on("error", error => finish({ found: false, path: binary, version: "", compatible: false, minimumVersion: MIN_OPENOCD_VERSION, error: error.message }));
+        child.on("close", () => {
+            const version = parseOpenOcdVersion(output);
+            const found = Boolean(version || /open on-chip debugger/i.test(output));
+            finish({
+                found,
+                path: binary,
+                version,
+                ...checkOpenOcdVersion(version),
+                error: found ? "" : "Executable output was not recognized as OpenOCD"
+            });
+        });
+    });
+}
+
+function resolveOpenOcdLaunch(executable, probe, target) {
+    if (!isSafeCfgPath(probe) || !isSafeCfgPath(target)) throw new Error("Unsafe OpenOCD configuration path.");
+    const binary = resolveExecutablePath(executable);
+    if (!binary || (!binary.includes("/") && !binary.includes("\\"))) {
+        throw Object.assign(new Error(`Unable to resolve OpenOCD executable: ${executable}`), { code: "OPENOCD_NOT_FOUND" });
+    }
+    const prefix = path.dirname(path.dirname(binary));
+    const roots = [
+        process.env.OPENOCD_SCRIPTS,
+        path.join(prefix, "scripts"),
+        path.join(prefix, "openocd", "scripts"),
+        path.join(prefix, "share", "openocd", "scripts")
+    ].filter(Boolean);
+    let scriptsRoot = "";
+    for (const root of roots) {
+        try {
+            const resolved = fs.realpathSync(root);
+            if (fs.statSync(path.join(resolved, "target")).isDirectory()) { scriptsRoot = resolved; break; }
+        } catch { /* try next layout */ }
+    }
+    if (!scriptsRoot) throw Object.assign(new Error(`Unable to locate OpenOCD scripts for ${binary}`), { code: "OPENOCD_SCRIPTS_NOT_FOUND" });
+    const resolveConfig = (kind, name) => {
+        const base = fs.realpathSync(path.join(scriptsRoot, kind));
+        let resolved;
+        try { resolved = fs.realpathSync(path.join(base, ...name.split("/"))); }
+        catch { throw Object.assign(new Error(`OpenOCD config not found: ${kind}/${name}`), { code: "OPENOCD_CONFIG_NOT_FOUND" }); }
+        const relative = path.relative(base, resolved);
+        if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(`Unsafe OpenOCD config: ${kind}/${name}`);
+        return resolved;
+    };
+    return {
+        executable: binary,
+        scriptsRoot,
+        cwd: scriptsRoot,
+        probePath: resolveConfig("interface", probe),
+        targetPath: resolveConfig("target", target)
+    };
+}
+
 function tclQuote(value) {
     const escaped = String(value)
         .replace(/\\/g, "\\\\")
@@ -162,13 +290,24 @@ function toPosix(value) {
 
 // 运行 OpenOCD 并把 stdout/stderr 逐行转发到本进程 stdout（OpenOCD 诊断走 stderr，
 // 与 PowerShell 版的 2>&1 行为保持一致），同时收集行供 EP_VERIFY 标记解析。
-function runOpenOcd(executable, args) {
+function runOpenOcd(executable, args, options = {}) {
     return new Promise((resolve, reject) => {
         let child;
-        try { child = spawn(executable, args, { windowsHide: true, shell: false }); }
+        try { child = spawn(executable, args, { cwd: options.cwd, windowsHide: true, shell: false }); }
         catch (error) { reject(error); return; }
         const lines = [];
         let settled = false;
+        const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 120000;
+        const finish = (error, result) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            if (error) reject(error); else resolve(result);
+        };
+        const timer = setTimeout(() => {
+            try { child.kill(); } catch { /* process may already be exiting */ }
+            finish(Object.assign(new Error(`OpenOCD timed out after ${timeoutMs}ms`), { code: "OPENOCD_TIMEOUT" }));
+        }, timeoutMs);
         const collect = stream => {
             let buffer = "";
             stream.on("data", chunk => {
@@ -190,10 +329,10 @@ function runOpenOcd(executable, args) {
         collect(child.stdout);
         collect(child.stderr);
         child.on("error", error => {
-            if (!settled) { settled = true; reject(error); }
+            finish(error);
         });
         child.on("close", code => {
-            if (!settled) { settled = true; resolve({ code: code == null ? -1 : code, lines }); }
+            finish(null, { code: code == null ? -1 : code, lines });
         });
     });
 }
@@ -215,6 +354,14 @@ async function preflight(options) {
         probe = detected.probe;
         notes.push(...detected.notes);
     }
+    const openocdCheck = await probeOpenOcdCompatibility(openocd);
+    if (!openocdCheck.compatible) {
+        const detected = openocdCheck.version ? ` ${openocdCheck.version}` : " with an unknown version";
+        const action = process.platform === "win32"
+            ? "Upgrade it or use EmberProbe's bundled xPack OpenOCD."
+            : "Upgrade OpenOCD with your package manager and select the new executable.";
+        notes.push(`OpenOCD${detected} is incompatible; EmberProbe requires ${MIN_OPENOCD_VERSION} or newer. ${action}`);
+    }
     let elfMtimeUtc = "";
     let elfSha256 = "";
     if (elf) {
@@ -234,6 +381,9 @@ async function preflight(options) {
         target,
         probe,
         openocd,
+        openocdVersion: openocdCheck.version,
+        openocdCompatible: openocdCheck.compatible,
+        minimumOpenocdVersion: MIN_OPENOCD_VERSION,
         ready: Boolean(elf && target && probe),
         notes
     };
@@ -252,9 +402,15 @@ module.exports = {
     probeFromText,
     sha256,
     isSafeCfgPath,
+    resolveExecutablePath,
+    parseOpenOcdVersion,
+    checkOpenOcdVersion,
+    probeOpenOcdCompatibility,
+    resolveOpenOcdLaunch,
     tclQuote,
     toPosix,
     runOpenOcd,
     preflight,
-    emit
+    emit,
+    MIN_OPENOCD_VERSION
 };
