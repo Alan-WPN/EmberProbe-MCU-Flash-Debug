@@ -103,8 +103,26 @@ assert.ok(sidebarEn.includes('>Live Read/Write</summary>'), "English sidebar sho
 
 const panel = liveWatchView.getLiveWatchContent({ maxSamples: -10, intervalMs: 1 });
 validateScripts("liveWatchView", panel);
+assert.strictEqual(i18n.t("zh", "lw.panelTitle", { n: 2 }), "波形图 #2", "chart panel tabs should use the concise waveform title");
 assert.ok(panel.includes('id="timeWindow"'));
+assert.ok(panel.includes('option value="custom"') && panel.includes('data-i18n="lw.windowCustom"'), "manual chart zoom should expose a custom window state");
 assert.ok(panel.includes('id="freeze"'));
+assert.ok(panel.includes('id="chartTimeline"') && panel.includes('id="chartFromRange"') && panel.includes('id="chartToRange"'), "the chart should expose an editable dual-handle timeline");
+assert.ok(panel.includes('id="chartRangeFill"') && panel.includes("VP.panClamped(startRange,delta"), "the highlighted chart range should be draggable as a whole");
+assert.ok(panel.includes('function snapDraggedRangeEdges()') && panel.includes('chartState.follow=false;fill.classList.add'), "a new timeline-range drag should pause right-edge following before evaluating either snap edge");
+assert.ok(panel.includes('snapDraggedRangeEdges();setWindowCustom()') && panel.includes('chartState.x.min-chartState.bounds.min<=tolerance'), "dragging the highlighted chart range near the left edge should snap to the sampling start");
+assert.ok(panel.includes('startPinned:false') && panel.includes("else if(chartState.startPinned)chartState.x={min:next.min,max:next.max}"), "simultaneously pinned timeline endpoints should expand instead of shifting the left edge");
+assert.ok(panel.includes("if(edge==='min'") && panel.includes("if(edge==='max'") && panel.includes('chartState.startPinned=chartState.x.min===chartState.bounds.min'), "timeline endpoint handles should snap and retain their edge state independently");
+assert.ok(panel.includes('function beginTimelineEndpoint(edge)') && panel.includes('chartState.follow=!chartState.endpointDrag'), "live following should remain paused throughout an endpoint-handle drag");
+assert.ok(panel.includes("canvas.addEventListener('wheel'") && panel.includes("region==='plot'||region==='x'"), "wheel input should zoom the plot and X axis continuously");
+assert.ok(panel.includes("region==='plot'||region==='y'") && panel.includes('VP.zoomCentered(chartState.y'), "Y zoom should remain centered");
+assert.ok(panel.includes("e.button!==2") && panel.includes("canvas.addEventListener('contextmenu'"), "right-button dragging should adjust the waveform without opening a context menu");
+assert.ok(panel.includes('dy/g.ph*4') && panel.includes('VP.zoomCentered(chartState.drag.y'), "right-button vertical dragging should scale continuously around the Y viewport center");
+assert.ok(panel.includes('function drawCrosshair(colors)') && panel.includes('yValue=chartState.y.max-ratio*VP.span(chartState.y)'), "hovering should show the Y coordinate directly under the cursor");
+assert.ok(panel.includes("if(!norm)drawAxisBadge(yText"), "normalized charts should hide the cursor Y-axis value");
+assert.ok(panel.includes('var padL=64'), "the chart should keep a compact Y-axis gutter");
+assert.ok(panel.includes('>波形图</span>'), "the live chart header should use the waveform title");
+assert.ok(panel.includes('window.EmberChartViewport') && panel.includes('function zoomClamped'), "the panel should embed the testable viewport math module");
 assert.ok(panel.includes('id="export"') && panel.includes("type:'exportCsv'"), "chart toolbar should offer CSV export through the extension");
 assert.ok(panel.includes('function buildCsv'), "panel should embed the shared CSV builder");
 assert.ok(panel.includes('window.__BUILD_CSV__=function buildCsv') && panel.includes('var buildCsv=window.__BUILD_CSV__'), "the webview should execute the shared CSV builder");

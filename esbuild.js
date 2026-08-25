@@ -22,6 +22,7 @@ function webviewBuild(area) {
         absWorkingDir: __dirname,
         entryPoints: [
             path.join(__dirname, "src", "webview", area, "renderer.js"),
+            ...(area === "liveWatch" ? [path.join(__dirname, "src", "webview", area, "viewport.js")] : []),
             path.join(__dirname, "src", "webview", area, "app.css")
         ],
         bundle: true,
