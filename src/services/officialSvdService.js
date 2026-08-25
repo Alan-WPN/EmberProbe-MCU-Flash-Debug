@@ -393,11 +393,12 @@ function vendorMatches(candidate, identity) {
 
 function safeZipName(name) {
     const normalized = String(name || "").replace(/\\/g, "/");
+    const pathValue = normalized.endsWith("/") ? normalized.slice(0, -1) : normalized;
     if (
-        !normalized ||
+        !pathValue ||
         normalized.startsWith("/") ||
         /^[A-Za-z]:/.test(normalized) ||
-        normalized.split("/").some((part) => part === ".." || part === "")
+        pathValue.split("/").some((part) => part === ".." || part === "")
     ) {
         throw Object.assign(new Error(`Unsafe path in CMSIS-Pack: ${name}`), { code: "UNSAFE_PACK_PATH" });
     }
@@ -442,6 +443,11 @@ function extractPackEntry(packPath, wantedPath, maxBytes = MAX_XML_BYTES) {
                                 code: "UNSAFE_PACK_LINK"
                             })
                         );
+                        return;
+                    }
+                    // ZIP 目录条目（如 SVD/）是合法的 Pack 结构；它们不包含可提取数据。
+                    if (name.endsWith("/")) {
+                        zip.readEntry();
                         return;
                     }
                     if (name.toLowerCase() !== String(wantedPath).replace(/\\/g, "/").toLowerCase()) {

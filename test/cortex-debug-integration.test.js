@@ -23,5 +23,10 @@ assert.match(debugBridge, /snapshotReady/);
 assert.match(debugBridge, /SNAPSHOT_RETRY_DELAYS_MS/);
 assert.ok(provider.indexOf("await this.prepareForCortexDebug(workspaceFolder)") < provider.indexOf("this._debugStarting = true"), "live watch must release the probe before debug start claims it");
 assert.match(provider, /debugConfig\.objdumpPath = cortexTools\.objdumpPath/, "the in-memory config should pass an existing objdump/nm toolchain pair");
+assert.match(
+    provider,
+    /setWorkspace\(session\.workspaceFolder \|\| this\._commandContext\(\)\.folder\)/,
+    "multi-root debug sessions must use the folder supplied by VS Code"
+);
 
 console.log("Cortex-Debug integration contract tests passed");

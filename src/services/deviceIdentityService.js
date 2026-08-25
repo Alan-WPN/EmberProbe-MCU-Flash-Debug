@@ -63,13 +63,15 @@ function extractProjectParts(text) {
     return parts;
 }
 
-function scanProject(workspacePath, maxFiles = 80) {
+function scanProject(workspacePath, maxFiles = 80, maxEntries = 5000) {
     if (!workspacePath || !fs.existsSync(workspacePath)) return [];
     const found = [];
     const queue = [workspacePath];
     const allowed = /(?:\.ioc|\.ya?ml|\.pdsc|\.cprj)$/i;
     const ignored = new Set([".git", "node_modules", "dist", "build", "out"]);
-    while (queue.length && found.length < maxFiles) {
+    let scannedFiles = 0;
+    let visitedEntries = 0;
+    while (queue.length && scannedFiles < maxFiles && visitedEntries < maxEntries) {
         const dir = queue.shift();
         let entries = [];
         try {
@@ -78,9 +80,11 @@ function scanProject(workspacePath, maxFiles = 80) {
             continue;
         }
         for (const entry of entries) {
+            visitedEntries += 1;
             if (entry.isDirectory()) {
                 if (!ignored.has(entry.name)) queue.push(path.join(dir, entry.name));
             } else if (allowed.test(entry.name)) {
+                scannedFiles += 1;
                 const file = path.join(dir, entry.name);
                 try {
                     const stat = fs.statSync(file);
@@ -91,7 +95,7 @@ function scanProject(workspacePath, maxFiles = 80) {
                     /* ignore unreadable project metadata */
                 }
             }
-            if (found.length >= maxFiles) break;
+            if (scannedFiles >= maxFiles || visitedEntries >= maxEntries) break;
         }
     }
     return found;

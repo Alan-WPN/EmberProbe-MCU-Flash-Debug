@@ -4,7 +4,7 @@ const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const { SvdManager } = require("../src/services/svdManager");
+const { SvdManager, findFiles } = require("../src/services/svdManager");
 
 const SVD = Buffer.from(`<?xml version="1.0"?><device><name>STM32F40x</name><vendor>STMicroelectronics</vendor><peripherals><peripheral><name>GPIOA</name><baseAddress>0x40020000</baseAddress></peripheral></peripherals></device>`);
 
@@ -14,6 +14,16 @@ const SVD = Buffer.from(`<?xml version="1.0"?><device><name>STM32F40x</name><ven
     const storagePath = path.join(root, "storage");
     await fs.promises.mkdir(workspacePath);
     await fs.promises.mkdir(storagePath);
+    const scanPath = path.join(root, "bounded-scan");
+    await fs.promises.mkdir(scanPath);
+    for (let index = 0; index < 10; index += 1)
+        await fs.promises.writeFile(path.join(scanPath, `file-${index}.txt`), "x");
+    let scanned = 0;
+    findFiles(scanPath, () => {
+        scanned += 1;
+        return false;
+    }, 100, 3);
+    assert.strictEqual(scanned, 3, "file discovery must stop at the visited-entry budget even without matches");
     const elf = path.join(workspacePath, "firmware.elf");
     const svd = path.join(workspacePath, "chip.svd");
     await fs.promises.writeFile(elf, "ELF");

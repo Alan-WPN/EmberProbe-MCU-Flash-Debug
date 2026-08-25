@@ -11,12 +11,13 @@ function folderKey(folder) {
     return folder?.uri?.toString?.() || "";
 }
 
-function findFiles(root, predicate, limit = 1000) {
+function findFiles(root, predicate, limit = 1000, maxEntries = Math.max(5000, limit * 10)) {
     const result = [];
     if (!root || !fs.existsSync(root)) return result;
     const queue = [root];
-    const ignored = new Set([".git", "node_modules", "dist", "out"]);
-    while (queue.length && result.length < limit) {
+    const ignored = new Set([".git", "node_modules", "dist", "build", "out"]);
+    let visitedEntries = 0;
+    while (queue.length && result.length < limit && visitedEntries < maxEntries) {
         const dir = queue.shift();
         let entries = [];
         try {
@@ -25,11 +26,12 @@ function findFiles(root, predicate, limit = 1000) {
             continue;
         }
         for (const entry of entries) {
+            visitedEntries += 1;
             const file = path.join(dir, entry.name);
             if (entry.isDirectory()) {
                 if (!ignored.has(entry.name)) queue.push(file);
             } else if (predicate(file)) result.push(file);
-            if (result.length >= limit) break;
+            if (result.length >= limit || visitedEntries >= maxEntries) break;
         }
     }
     return result;

@@ -6,7 +6,12 @@ const path = require("path");
 const os = require("os");
 const http = require("http");
 const yazl = require("yazl");
-const { DeviceIdentityService, extractProjectParts, targetIdentity } = require("../src/services/deviceIdentityService");
+const {
+    DeviceIdentityService,
+    extractProjectParts,
+    targetIdentity,
+    scanProject
+} = require("../src/services/deviceIdentityService");
 const { SvdLibraryService, validateSvdBuffer } = require("../src/services/svdLibraryService");
 const {
     OfficialSvdService, collectDevices, collectLicenses, latestRelease, parseXml, parseIndex,
@@ -22,7 +27,10 @@ function zipBuffer(entries) {
         zip.outputStream.on("data", chunk => chunks.push(chunk));
         zip.outputStream.on("error", reject);
         zip.outputStream.on("end", () => resolve(Buffer.concat(chunks)));
-        for (const [name, value] of entries) zip.addBuffer(Buffer.from(value), name);
+        for (const [name, value] of entries) {
+            if (value === null) zip.addEmptyDirectory(name);
+            else zip.addBuffer(Buffer.from(value), name);
+        }
         zip.end();
     });
 }
@@ -33,6 +41,16 @@ function zipBuffer(entries) {
 
     const workspace = await fs.promises.mkdtemp(path.join(os.tmpdir(), "emberprobe-identity-"));
     await fs.promises.writeFile(path.join(workspace, "board.ioc"), "Mcu.Name=STM32F407VGT6\n");
+    const boundedScan = path.join(workspace, "bounded-scan");
+    await fs.promises.mkdir(boundedScan);
+    for (let index = 0; index < 10; index += 1)
+        await fs.promises.writeFile(path.join(boundedScan, `board-${index}.yaml`), "device: STM32F407VG\n");
+    assert.strictEqual(
+        scanProject(boundedScan, 80, 3).length,
+        3,
+        "project identity scanning must stop at the visited-entry budget"
+    );
+    await fs.promises.rm(boundedScan, { recursive: true, force: true });
     const identity = new DeviceIdentityService().resolve({ workspacePath: workspace, target: "stm32f4x.cfg" });
     assert.strictEqual(identity.device, "STM32F407VGT6");
     assert.strictEqual(identity.exact, true);
@@ -83,13 +101,15 @@ function zipBuffer(entries) {
     assert.strictEqual(parseIndex(Buffer.from(`<index><url>https://example.invalid/</url><pindex><pdsc vendor="A" name="B_DFP" version="1.0.0"/><pdsc vendor="Old" name="Old" version="1.0.0" deprecated="yes"/></pindex></index>`)).length, 1);
     assert.throws(() => safeZipName("../escape.svd"), error => error.code === "UNSAFE_PACK_PATH");
     assert.throws(() => safeZipName("/absolute.svd"), error => error.code === "UNSAFE_PACK_PATH");
+    assert.strictEqual(safeZipName("SVD/"), "SVD/");
+    assert.throws(() => safeZipName("SVD//device.svd"), error => error.code === "UNSAFE_PACK_PATH");
     assert.strictEqual(deviceMatches({ device: "STM32F407VG", family: "STM32F4" }, { family: "STM32F4XX" }), true);
     assert.strictEqual(vendorMatches({ vendor: "STMicroelectronics:13" }, { vendor: "STMicroelectronics" }), true);
     assert.strictEqual(vendorMatches({ vendor: "GigaDevice" }, { vendor: "STMicroelectronics" }), false);
     assert.strictEqual(vendorMatches({ vendor: "" }, { vendor: "STMicroelectronics" }), true);
     assert(packageScore({ name: "STM32F4xx_DFP", vendor: "Keil" }, { device: "STM32F407VG", vendor: "STMicroelectronics" }) >= 20);
 
-    const pack = await zipBuffer([["SVD/STM32F40x.svd", VALID_SVD], ["LICENSE.txt", "test license"]]);
+    const pack = await zipBuffer([["SVD/", null], ["SVD/STM32F40x.svd", VALID_SVD], ["LICENSE.txt", "test license"]]);
     let baseUrl = "";
     const server = http.createServer((req, res) => {
         if (req.url === "/index.pidx") {

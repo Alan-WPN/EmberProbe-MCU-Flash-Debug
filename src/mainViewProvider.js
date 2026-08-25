@@ -1564,7 +1564,8 @@ class MainViewProvider {
     handleDebugSessionStart(session) {
         if (!session || session.type !== 'cortex-debug') return;
         this._debugReadPlanKey = this._activeReadPlan().map(item => `${item.name}:${item.address}:${item.size}`).join('|');
-        this._debugBridge.setWorkspace(this._commandContext().folder);
+        // 多根工作区中会话归属以 VS Code 实际调试目录为准，避免被缓存 ELF 所在目录覆盖。
+        this._debugBridge.setWorkspace(session.workspaceFolder || this._commandContext().folder);
         this._debugBridge.attach(session);
         this._debugBridge.setIntent(this._samplingIntent);
     }
