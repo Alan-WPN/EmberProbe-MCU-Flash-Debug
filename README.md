@@ -6,20 +6,19 @@ EmberProbe 是一款面向 Cortex-M 开发的 VS Code 扩展。它基于 OpenOCD
 
 ## 功能特性
 
-- 自动检测工作区中最新的 ELF 文件。
-- 通过 `.ioc`、CMake 和链接脚本推断 MCU 目标。
-- 在侧边栏检测 OpenOCD 环境并展示其状态；Windows x64 支持一键离线安装，也可指向已有的 OpenOCD 可执行文件。
-- Linux/macOS 无预置包：请用系统包管理器安装（如 `sudo apt install openocd`、`brew install openocd`），再通过“选择 OpenOCD”指定路径；Linux 访问 USB 探针还需 udev 规则或相应用户组权限（详见 [OpenOCD udev 规则](https://github.com/openocd-org/openocd/blob/master/contrib/60-openocd.rules)）。
+- 自动检测工作区中最新的 ELF 文件与 MCU 目标。
 - 芯片信息读取：通过 OpenOCD 非侵入式读取芯片内核、Device ID、Flash 容量、UID、调试链路与运行状态。
+- ELF文件烧录：一键烧录ELF文件并运行。
 - 实时变量观测：在目标运行时非侵入式读取 Cortex-M 内存；侧边栏提供独立数值列表，可同时打开多个拥有独立观察列表和历史缓冲的实时图表面板。
-- Cortex-Debug 联动：调试始终使用内存配置，不读写 `launch.json`；目标运行时等待暂停，暂停后通过同一 DAP 会话自动读写，调试结束后按用户原本的采样意图恢复。
-- 官方 SVD 管理：根据工程和芯片信息从 Open-CMSIS-Pack 官方 DFP 下载，显示进度并校验；SVD 以哈希去重保存在扩展全局库，可按工作区绑定和共用。
+- 实时变量写入：在目标运行时实时更改内存，提供滑条、输入框、鼠标滚轮多种值更改方式，更改后自动回读。
+- Cortex-Debug 联动：启动断点调试。
 - 可选安装八个 Agent Skills，覆盖固件下载与校验、实时变量读写、芯片和故障信息读取、ELF 分析，以及配置同步。
 
 ## 环境要求
 
 - Visual Studio Code 1.85 或更高版本
 - OpenOCD
+- Cortex-Debug插件(可选)
 
 ## 实时变量观测
 
@@ -47,8 +46,6 @@ EmberProbe 是一款面向 Cortex-M 开发的 VS Code 扩展。它基于 OpenOCD
 
 扩展通过只监听本机的 Agent Bridge 处理配置和界面联动，并继续统一管理探针互斥。ELF 每次读取都会重新计算内容指纹和解析符号；采样期间 ELF 改变时会中止，避免继续使用旧变量地址。
 
-只有当前项目安装了 EmberProbe Agent Skills 时，扩展才会启动 Bridge，并在项目 Skills 共享运行时目录的 `.agents/skills/_emberprobe/agent-bridge.json` 写入一个不含令牌的临时指针。项目根目录不再创建 `.emberprobe`；全局安装 Skills、打开侧边栏以及使用烧录、调试、实时变量等普通功能也不会写入该指针。卸载项目级 Skills 时，指针会随 `_emberprobe` 运行时目录一起删除。
-
 ## 开发与构建
 
 ```powershell
@@ -59,7 +56,7 @@ npm run test:e2e
 npm run package
 ```
 
-准备新版本时运行 `npm run release:prepare -- <version> --date YYYY-MM-DD`，脚本会同步版本元数据、README 和 Changelog。推送匹配版本的 `vX.Y.Z` 标签后，Release 工作流会自动创建 GitHub Release 并上传 VSIX；发布及重试方式见 [docs/RELEASING.md](docs/RELEASING.md)。真机测试接入方式见 [test/hil/README.md](test/hil/README.md)。当前扩展版本为 `0.6.3`。
+准备新版本时运行 `npm run release:prepare -- <version> --date YYYY-MM-DD`，脚本会同步版本元数据、README 和 Changelog。推送匹配版本的 `vX.Y.Z` 标签后，Release 工作流会自动创建 GitHub Release 并上传 VSIX；发布及重试方式见 [docs/RELEASING.md](docs/RELEASING.md)。真机测试接入方式见 [test/hil/README.md](test/hil/README.md)。当前扩展版本为 `0.7.0`。
 
 ## 项目结构
 

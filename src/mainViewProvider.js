@@ -336,11 +336,17 @@ class MainViewProvider {
                 throw err; // 上抛给消息分发器，向 Webview 反馈 commandError 而非 commandSuccess
             }
         };
-        // 2. 选择调试器（无修改）
-        this.commandHandlers['mcu-vscode.selectDebugger'] = () => {
+        // 2. 选择调试器
+        this.commandHandlers['mcu-vscode.selectDebugger'] = async () => {
             console.log('主进程执行选择调试器命令');
+            const configured = vscode.workspace.getConfiguration('emberprobe').get('openocdPath', 'openocd');
+            const executable = await this._resolveOpenOcdPath(configured);
+            // 以当前 OpenOCD 实际包含的 interface 脚本为准，支持 WCH 等厂商分支。
+            // OpenOCD 尚未就绪时仍允许先完成手动配置，继续使用内置列表。
+            const discovered = executable ? openocdScripts.discoverInterfaceConfigs(executable) : [];
+            const debuggers = discovered.length ? discovered : DEBUGGER_LIST;
             const quickPick = vscode.window.createQuickPick();
-            quickPick.items = DEBUGGER_LIST.map(cfg => ({ label: cfg }));
+            quickPick.items = debuggers.map(cfg => ({ label: cfg }));
             quickPick.placeholder = this._t('msg.searchDebugger');
             quickPick.canSelectMany = false;
             quickPick.onDidChangeSelection(async selection => {

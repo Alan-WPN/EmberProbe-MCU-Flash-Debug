@@ -6,20 +6,19 @@ EmberProbe is a VS Code extension for Cortex-M development. Built on OpenOCD, it
 
 ## Features
 
-- Automatically detects the newest ELF file in the workspace.
-- Infers the MCU target from `.ioc`, CMake, and linker files.
-- Detects the OpenOCD environment in the sidebar and shows its status; Windows x64 supports one-click offline installation, or you can point to an existing OpenOCD executable.
-- Linux/macOS have no bundled package: install OpenOCD with your system package manager (e.g. `sudo apt install openocd`, `brew install openocd`) and point "Select OpenOCD" at it; on Linux, USB probes additionally require udev rules or group membership (see the [OpenOCD udev rules](https://github.com/openocd-org/openocd/blob/master/contrib/60-openocd.rules)).
+- Automatically detects the newest ELF file and MCU target in the workspace.
 - Chip info readout: non-intrusively reads the chip core, Device ID, Flash size, UID, debug link, and run state via OpenOCD.
+- ELF flashing: flash the ELF file and run it in one click.
 - Live variable watch: non-intrusively reads Cortex-M RAM while the target runs; the sidebar offers a standalone value list, and multiple chart panels can keep independent watch lists and history buffers.
-- Cortex-Debug integration: debugging always uses an in-memory configuration and never reads or writes `launch.json`; a running target waits for a halt, a halted target is read/written through the same DAP session, and standalone sampling is restored according to the user's sampling intent.
-- Official SVD management: resolves the device from project/hardware information, downloads and validates the official Open-CMSIS-Pack DFP with progress, and stores deduplicated SVDs in a global library with per-workspace bindings.
+- Live variable write: changes memory in real time while the target runs, offering slider, input box, and mouse wheel for value changes, with automatic read-back after each change.
+- Cortex-Debug integration: starts breakpoint debugging.
 - Optionally installs eight Agent Skills covering firmware download and verification, live variable reads and writes, chip and fault inspection, ELF analysis, and configuration synchronization.
 
 ## Requirements
 
 - Visual Studio Code 1.85 or later
 - OpenOCD
+- Cortex-Debug plugin (optional)
 
 ## Live Variable Watch
 
@@ -47,8 +46,6 @@ During debugging, Start preserves sampling intent without sending a pause reques
 
 The extension handles configuration and UI synchronization through a loopback-only Agent Bridge while continuing to manage probe mutual exclusion. Every ELF read recomputes the content fingerprint and resolves symbols; sampling aborts when the ELF changes during a session to avoid reusing stale variable addresses.
 
-The extension starts the Bridge only when EmberProbe Agent Skills are installed in the current project, writing a temporary token-free pointer to `.agents/skills/_emberprobe/agent-bridge.json` beside the shared Skill runtime. It no longer creates a project-root `.emberprobe` directory. Globally installed Skills, opening the sidebar, and ordinary flash, debug, or live-watch features do not write the pointer. Uninstalling project-scoped Skills removes it together with the `_emberprobe` runtime directory.
-
 ## Development & Build
 
 ```powershell
@@ -59,7 +56,7 @@ npm run test:e2e
 npm run package
 ```
 
-Run `npm run release:prepare -- <version> --date YYYY-MM-DD` when preparing a new version; the script synchronizes version metadata, the README, and the Changelog. Pushing the matching `vX.Y.Z` tag automatically creates a GitHub Release and uploads the VSIX; see [docs/RELEASING.md](docs/RELEASING.md) for publishing and retry instructions. See [test/hil/README.md](test/hil/README.md) for hardware-runner setup. The current extension version is `0.6.3`.
+Run `npm run release:prepare -- <version> --date YYYY-MM-DD` when preparing a new version; the script synchronizes version metadata, the README, and the Changelog. Pushing the matching `vX.Y.Z` tag automatically creates a GitHub Release and uploads the VSIX; see [docs/RELEASING.md](docs/RELEASING.md) for publishing and retry instructions. See [test/hil/README.md](test/hil/README.md) for hardware-runner setup. The current extension version is `0.7.0`.
 
 ## Project Structure
 

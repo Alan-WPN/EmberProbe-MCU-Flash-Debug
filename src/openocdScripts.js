@@ -125,6 +125,13 @@ function discoverTargetConfigs(executable) {
         .sort((a, b) => a.localeCompare(b, "en", { numeric: true, sensitivity: "base" }));
 }
 
+function discoverInterfaceConfigs(executable) {
+    const scriptsRoot = findScriptsRoot(executable);
+    if (!scriptsRoot) return [];
+    return walkCfgFiles(path.join(scriptsRoot, "interface"))
+        .sort((a, b) => a.localeCompare(b, "en", { numeric: true, sensitivity: "base" }));
+}
+
 module.exports = {
     isSafeCfgPath,
     resolveExecutablePath,
@@ -132,5 +139,6 @@ module.exports = {
     findScriptsRoot,
     resolveConfigFile,
     resolveOpenOcdLaunch,
-    discoverTargetConfigs
+    discoverTargetConfigs,
+    discoverInterfaceConfigs
 };

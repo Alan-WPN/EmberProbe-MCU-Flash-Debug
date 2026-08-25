@@ -6,8 +6,19 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-25
+
+### Added
+
+- Cortex-Debug 接入：安装 Cortex-Debug 后可从 EmberProbe 快速启动断点调试（[#12](https://github.com/BakeSheep/EmberProbe-MCU-Flash-Debug/issues/12)）。
+- 波形图支持伸缩、移动坐标轴和时间范围选择，改善波形观察交互。
+- 增加 OpenOCD 版本检测与不兼容提醒，要求 OpenOCD 0.12.0 或更高版本。
+- 增加 SVD 文件选择、官方 CMSIS-Pack 下载、校验、全局去重库与工作区绑定，并为后续 Skills 预留接口。
+
 ### Fixed
 
+- 修复 STM32H7 系列读取芯片信息后采样值不再更新的问题：运行态芯片信息读取不再主动 halt/resume。
+- 调试器与 MCU 配置列表改为从当前 OpenOCD scripts 动态发现，支持 WCH 等第三方 OpenOCD 分支并避免展示当前版本未包含的配置（[#13](https://github.com/BakeSheep/EmberProbe-MCU-Flash-Debug/issues/13)）。
 - OpenOCD 环境检查新增最低版本门禁（`>= 0.12.0`）：0.11.x、0.12.0 RC 或无法识别版本的构建不再进入下载、调试、实时读写和 Agent Flash Skills；Windows x64 会引导一键切换到插件内置 xPack OpenOCD 0.12.0-7，其他平台显示升级与重新选择路径提示。
 - Flash Skills 跨平台测试在 macOS 上统一比较规范化真实路径，兼容系统将 `/var` 映射为 `/private/var`；常规 CI 仅在分支推送和 Pull Request 上运行，发布标签由 Release 工作流独立验证，避免同一标签重复执行整套门禁。
 - OpenOCD 0.12 的 `verify_image` 在 STM32H7/F4 等 target 上会使用 `backup=0` 的 RAM work-area，可覆盖与之重叠的 `.data/.bss`；独立校验现在禁用 target work-area 并回退为主机侧比对，下载与 Cortex-Debug 则对所有 target 开启 work-area 备份恢复。
