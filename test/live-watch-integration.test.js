@@ -1,5 +1,6 @@
 "use strict";
 const assert = require("assert");
+const { EventEmitter } = require("events");
 const { LiveWatchSession } = require("../src/liveWatch");
 const { FakeOpenOcdServer } = require("./helpers/fake-openocd-server");
 
@@ -40,9 +41,62 @@ const { FakeOpenOcdServer } = require("./helpers/fake-openocd-server");
         assert.deepStrictEqual(fake.commands.filter(command => command === "halt" || command === "resume"), ["halt", "resume"]);
         assert.strictEqual(fake.state, "running", "write transaction should restore the target run state");
     } finally {
-        session.stop();
+        await session.stop();
         await fake.stop();
     }
+
+    // Reload Window 停用扩展时必须先让 OpenOCD 收到 shutdown 并退出，不能立即断 socket/杀进程。
+    const child = new EventEmitter();
+    child.exitCode = null;
+    child.signalCode = null;
+    child.killed = false;
+    child.kill = signal => { child.killed = true; child.lastSignal = signal || "SIGTERM"; return true; };
+    let shutdownFrame = "";
+    const graceful = new LiveWatchSession(null, {}, {});
+    graceful.child = child;
+    graceful.socket = {
+        destroyed: false,
+        write(data, callback) {
+            shutdownFrame = data;
+            setImmediate(() => {
+                callback();
+                child.exitCode = 0;
+                child.emit("close", 0);
+            });
+        },
+        destroy() { this.destroyed = true; }
+    };
+    const gracefulStop = graceful.stop(100);
+    assert.strictEqual(graceful.stopped, true, "stop should synchronously prevent more samples");
+    assert.strictEqual(child.killed, false, "OpenOCD should get a graceful shutdown opportunity before signals are sent");
+    assert.strictEqual(await gracefulStop, true);
+    assert.strictEqual(shutdownFrame, "shutdown\x1a");
+    assert.strictEqual(child.killed, false, "a clean OpenOCD exit must not be followed by a kill signal");
+
+    // 芯片复位导致的瞬时读取错误，在下一次完整采样成功后必须清除并恢复正常显示。
+    const recoveryStatuses = [];
+    const recoveryErrors = [];
+    const recoverySamples = [];
+    const recovering = new LiveWatchSession(null, {}, {
+        onStatus: status => recoveryStatuses.push(status),
+        onError: error => recoveryErrors.push(error),
+        onSample: samples => recoverySamples.push(samples)
+    });
+    recovering.socket = { destroyed: false };
+    recovering.watch = [{ name: "counter", address: 0x20000000, size: 4 }];
+    let recoveryAttempt = 0;
+    recovering._readItems = async (_items, timestamp) => {
+        recoveryAttempt++;
+        if (recoveryAttempt === 1) throw new Error("target reset during read");
+        return { samples: [{ name: "counter", bytes: [2, 0, 0, 0], timestamp }], ok: 1 };
+    };
+    await recovering._sampleTick();
+    assert.deepStrictEqual(recoveryErrors, ["target reset during read"]);
+    assert.strictEqual(recovering._sampleErrorActive, true);
+    await recovering._sampleTick();
+    assert.strictEqual(recovering._sampleErrorActive, false);
+    assert.strictEqual(recoverySamples.length, 1);
+    assert.deepStrictEqual(recoveryStatuses, [{ key: "sb.sampling" }]);
 
     console.log("Live watch Tcl-RPC integration tests passed");
 })().catch(error => {

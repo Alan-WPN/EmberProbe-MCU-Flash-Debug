@@ -12,6 +12,8 @@ EmberProbe 是一款面向 Cortex-M 开发的 VS Code 扩展。它基于 OpenOCD
 - Linux/macOS 无预置包：请用系统包管理器安装（如 `sudo apt install openocd`、`brew install openocd`），再通过“选择 OpenOCD”指定路径；Linux 访问 USB 探针还需 udev 规则或相应用户组权限（详见 [OpenOCD udev 规则](https://github.com/openocd-org/openocd/blob/master/contrib/60-openocd.rules)）。
 - 芯片信息读取：通过 OpenOCD 非侵入式读取芯片内核、Device ID、Flash 容量、UID、调试链路与运行状态。
 - 实时变量观测：在目标运行时非侵入式读取 Cortex-M 内存；侧边栏提供独立数值列表，可同时打开多个拥有独立观察列表和历史缓冲的实时图表面板。
+- Cortex-Debug 联动：调试始终使用内存配置，不读写 `launch.json`；目标运行时等待暂停，暂停后通过同一 DAP 会话自动读写，调试结束后按用户原本的采样意图恢复。
+- 官方 SVD 管理：根据工程和芯片信息从 Open-CMSIS-Pack 官方 DFP 下载，显示进度并校验；SVD 以哈希去重保存在扩展全局库，可按工作区绑定和共用。
 - 可选安装八个 Agent Skills，覆盖固件下载与校验、实时变量读写、芯片和故障信息读取、ELF 分析，以及配置同步。
 
 ## 环境要求
@@ -29,6 +31,8 @@ EmberProbe 是一款面向 Cortex-M 开发的 VS Code 扩展。它基于 OpenOCD
 - 实时写入：侧边栏可把具有可靠 DWARF 类型且位于 ELF 可写段的标量加入写入列表；写入只在采样会话运行时启用，并在每次写入后回读校验。
 - 限制：仅支持 Cortex-M 及固定地址的全局/静态变量；采样带宽有限（约 10–50 Hz）。多面板共享采样启停和间隔，内存占用随面板数线性增长，每个面板分别受 `maxSamples` 限制。
 - 相关设置：`emberprobe.tclPort`、`emberprobe.sampleIntervalMs`、`emberprobe.maxSamples`。
+
+调试期间，“开始”代表保留采样意图：芯片运行时仅显示“等待暂停”，不会主动发送 pause；芯片暂停后以不低于 250 ms 的周期通过 DAP 采样，并允许经安全检查的写入。侧边栏的 SVD 区域可选择已有文件或下载官方 SVD；新绑定从下一次调试开始生效。
 
 ## Agent Skills
 

@@ -20,6 +20,9 @@ function activate(context) {
         vscode.commands.registerCommand("mcu-vscode.folderDownload", resource => provider.commandHandlers["mcu-vscode.download"](resource)),
         vscode.commands.registerCommand("mcu-vscode.openLiveWatch", () => provider.commandHandlers["mcu-vscode.openLiveWatch"]()),
         vscode.commands.registerCommand("mcu-vscode.manageAgentSkills", () => provider.commandHandlers["mcu-vscode.manageAgentSkills"]()),
+        vscode.commands.registerCommand("mcu-vscode.downloadOfficialSvd", () => provider.commandHandlers["mcu-vscode.downloadOfficialSvd"]()),
+        vscode.commands.registerCommand("mcu-vscode.selectExistingSvd", () => provider.commandHandlers["mcu-vscode.selectExistingSvd"]()),
+        vscode.commands.registerCommand("mcu-vscode.switchWorkspaceSvd", () => provider.commandHandlers["mcu-vscode.switchWorkspaceSvd"]()),
         vscode.commands.registerCommand("mcu-vscode.checkOpenOcd", async () => {
             await vscode.commands.executeCommand("workbench.view.extension.mcu-vscode-container");
             await provider.refreshOpenOcdStatus(true);
@@ -36,20 +39,29 @@ function activate(context) {
         }),
         {
             dispose: () => {
-                provider.stopLiveWatch();
-                provider.stopAgentReadIfRunning();
-                provider.stopAgentBridge().catch(() => {});
+                provider.shutdown().catch(() => {});
             }
         },
-        vscode.debug.onDidStartDebugSession(session => {
-            if (session && session.type === "cortex-debug") {
-                provider.stopLiveWatchIfRunning();
-                provider.stopAgentReadIfRunning();
+        vscode.debug.registerDebugConfigurationProvider("cortex-debug", {
+            async resolveDebugConfiguration(folder, config) {
+                await provider.prepareForCortexDebug(folder);
+                return config;
             }
         }),
-        vscode.debug.onDidTerminateDebugSession(session => {
-            if (session && session.type === "cortex-debug") provider.stopLiveWatchIfRunning();
-        })
+        vscode.debug.registerDebugAdapterTrackerFactory("cortex-debug", {
+            createDebugAdapterTracker(session) {
+                provider.handleDebugSessionStart(session);
+                return {
+                    onDidSendMessage: message => provider.handleDebugAdapterMessage(session, message),
+                    onError: error => console.error("Cortex-Debug adapter error:", error),
+                    onExit: () => {}
+                };
+            }
+        }),
+        vscode.debug.onDidStartDebugSession(session => provider.handleDebugSessionStart(session)),
+        vscode.debug.onDidTerminateDebugSession(session => provider.handleDebugSessionTerminate(session).catch(error => {
+            console.error("Unable to restore EmberProbe sampling after Cortex-Debug:", error);
+        }))
     ];
     context.subscriptions.push(...subscriptions);
 
@@ -61,9 +73,7 @@ async function deactivate() {
     const provider = activeProvider;
     activeProvider = null;
     if (provider) {
-        provider.stopLiveWatch();
-        provider.stopAgentReadIfRunning();
-        await provider.stopAgentBridge().catch(() => {});
+        await provider.shutdown();
     }
     console.log("MCU_VSCODE 下载与调试器已停用！");
 }

@@ -11,6 +11,9 @@ const { runTests } = require("@vscode/test-electron");
             launchArgs: [
                 path.resolve(__dirname, "fixtures"),
                 "--disable-extensions",
+                "--headless",
+                "--disable-gpu",
+                "--ozone-platform=headless",
                 "--skip-welcome",
                 "--skip-release-notes"
             ],

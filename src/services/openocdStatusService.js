@@ -9,6 +9,7 @@ class OpenOcdStatusService {
         this.onStatus = options.onStatus;
         this.status = { state: "checking", key: "oc.checking", canInstall: false };
         this.operation = 0;
+        this.probes = new Map();
     }
 
     post(status) {
@@ -22,12 +23,23 @@ class OpenOcdStatusService {
         };
     }
 
+    probe(target) {
+        const key = String(target || "openocd");
+        const existing = this.probes.get(key);
+        if (existing) return existing;
+        const pending = Promise.resolve(this.checker.probeOpenOcd(target)).finally(() => {
+            if (this.probes.get(key) === pending) this.probes.delete(key);
+        });
+        this.probes.set(key, pending);
+        return pending;
+    }
+
     async refresh(showChecking = true) {
         const operation = ++this.operation;
         const report = this.reporter(operation);
         const target = this.vscode.workspace.getConfiguration("emberprobe").get("openocdPath", "openocd");
         if (showChecking) report({ state: "checking", key: "oc.checking" });
-        const result = await this.checker.probeOpenOcd(target);
+        const result = await this.probe(target);
         if (operation !== this.operation) return null;
         this.checker.setCache(result);
         return this.checker.resolveOpenOcdStatus(target, this.context, result, report);
@@ -65,7 +77,7 @@ class OpenOcdStatusService {
             });
             return cached.path;
         }
-        const result = await this.checker.probeOpenOcd(target);
+        const result = await this.probe(target);
         this.checker.setCache(result);
         if (operation !== this.operation) return null;
         const resolved = await this.checker.resolveOpenOcdStatus(target, this.context, result, report);

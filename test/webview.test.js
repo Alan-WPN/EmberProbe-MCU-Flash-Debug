@@ -18,6 +18,11 @@ const sidebar = modernView.getModernWebviewContent({ elf: "app.elf", debugger: "
 validateScripts("modernView", sidebar);
 assert.ok(sidebar.includes('id="liveValues"'));
 assert.ok(sidebar.includes('id="liveToggle"'));
+assert.ok(sidebar.includes("liveCard.classList.toggle('debug-stale'"), "debug values should remain visually stale until a pause snapshot succeeds");
+assert.ok(sidebar.includes("debugRunning=m.mode==='debug-running-waiting'"), "a running debug session should use the yellow live-state indicator even before sampling is enabled");
+assert.ok(sidebar.includes('.live-box.debug-stale .value-number'), "stale debug read values should be gray");
+assert.ok(sidebar.includes('.live-box.debug-stale .write-input'), "stale debug write values should be gray");
+assert.ok(sidebar.includes("m.source==='openocd'&&m.canRead===true"), "stopped standalone values should remain gray until sampling can read again");
 assert.ok(sidebar.includes('id="openocdCard"'), "sidebar should contain an OpenOCD status card");
 assert.ok(sidebar.includes('id="skillStatus"'), "sidebar should show Agent Skills installation status");
 assert.ok(sidebar.includes('skill-row') && sidebar.includes('skill-status-count'), "Agent Skills should use a dedicated aligned status card");
@@ -39,6 +44,13 @@ assert.ok(sidebar.includes('class="available-head"'), "variable metadata should 
 assert.ok(sidebar.indexOf('id="varResizeHandle"') > sidebar.indexOf('id="availableVars"'), "resize handle should sit below the ELF variable list");
 assert.ok(sidebar.includes('class="tree-row auto-row"'), "auto detection should be visually distinct inside MCU configuration");
 assert.ok(sidebar.includes('class="tree-divider">手动配置'), "manual MCU configuration should have a visual separator");
+assert.ok(sidebar.includes('class="chip-more config-more"') && sidebar.includes('>其他配置</summary>'), "SVD configuration should live in an MCU other-configuration card matching chip details");
+assert.ok(sidebar.includes('class="tree-row svd-config-row"') && sidebar.includes('>可选</span>'), "SVD selection should reuse the manual configuration card style and be marked optional");
+assert.ok(sidebar.indexOf('id="svdStatus"') < sidebar.indexOf('>芯片信息</summary>'), "SVD configuration should no longer be rendered inside chip information");
+const downloadAction = sidebar.indexOf('data-command="mcu-vscode.download"');
+const debugAction = sidebar.indexOf('data-command="mcu-vscode.debug"');
+assert.ok(downloadAction >= 0 && debugAction > downloadAction, "one-click Cortex-Debug should sit to the right of Download");
+assert.ok(sidebar.includes("state:'cancelling',key:'svd.cancelling'") && sidebar.includes("type:'cancelSvdDownload'"), "SVD cancellation should give immediate feedback and post a dedicated cancel message");
 assert.ok(!sidebar.includes('>推荐</span>'), "auto detection should not show a recommendation badge");
 assert.ok(!sidebar.includes('<summary>关键操作</summary>'), "redundant key-actions section should be removed");
 assert.ok(sidebar.includes('sym.isComposite'), "sidebar should guard aggregate variables");
@@ -140,6 +152,8 @@ assert.ok(panel.includes('card.append(rm,sw,main,sel)'), "remove button should b
 assert.ok(panel.includes("rm.textContent='-'"), "graph remove control should use a minus sign");
 assert.ok(panel.includes('id="sideSplitter"'), "current-value column should expose a vertical splitter");
 assert.ok(panel.includes('id="sideToggle"'), "current-value column should be collapsible");
+assert.ok(panel.includes("document.body.classList.toggle('debug-stale'"), "the live panel should track DAP snapshot freshness");
+assert.ok(panel.includes('body.debug-stale .var-value'), "the live panel should gray stale debug values");
 assert.ok(panel.includes('.side-toggle:before'), "collapse control should use a compact pane-layout icon");
 assert.ok(panel.includes('.layout.side-collapsed .side-toggle{color:var(--vscode-focusBorder)'), "collapsed value pane should have a distinct toggle state");
 assert.ok(panel.indexOf('id="sideToggle"') < panel.indexOf('id="run"'), "value-pane toggle should sit before the sampling button");

@@ -28,6 +28,9 @@ const { OpenOcdStatusService } = require("./services/openocdStatusService");
 const { SkillStatusService, hasWorkspaceSkills } = require("./services/skillStatusService");
 const { ChipInfoService } = require("./services/chipInfoService");
 const { LiveWatchService, buildActiveReadPlan, nextLivePanelId, selectFocusedPanel } = require("./services/liveWatchService");
+const { DebugSessionBridge, MIN_DAP_INTERVAL_MS } = require("./services/debugSessionBridge");
+const { SvdManager } = require("./services/svdManager");
+const { resolveCortexToolchainForWorkspace } = require("./services/cortexToolchainService");
 const { externalizeWebviewHtml } = require("./webviewAssets");
 const fs = require("fs");
 const os = require("os");
@@ -135,6 +138,11 @@ class MainViewProvider {
         this._csvExportSeq = 0;
         this._liveWatchService = new LiveWatchService(elfSymbols);
         this._latestSidebarSamples = this._liveWatchService.latestSidebarSamples;
+        this._samplingIntent = false;
+        this._debugCommandPending = false;
+        this._debugReadPlanKey = "";
+        this._shutdownPromise = null;
+        this._liveIntervalMs = 100;
         this._liveConsumers = new Set();
         this._consumerTypesCache = null;
         this._agentReadSession = null;
@@ -143,6 +151,13 @@ class MainViewProvider {
         this._agentReadDelayResolve = null;
         this._agentSamplingStatus = null;
         this._uiWritePromise = Promise.resolve();
+        this._debugBridge = new DebugSessionBridge({
+            getReadPlan: () => this._activeReadPlan(),
+            getIntervalMs: () => Math.max(MIN_DAP_INTERVAL_MS, this._liveIntervalMs),
+            onSamples: (samples, t) => this._handleRawSamples(samples, t),
+            onStatus: status => this._postConsumerStatuses(status, !!status.error),
+            onError: error => this._postLive({ type: 'liveError', key: error.i18nKey, message: error.message || String(error) })
+        });
         this._writeAuthorization = new WriteAuthorization(context.workspaceState);
         this._configurationStore = new ConfigurationStore({
             vscode,
@@ -196,6 +211,14 @@ class MainViewProvider {
             onPost: message => this._webviewView?.webview.postMessage(message),
             onDiagnostics: (diag, info) => this._writeChipDiagnostics(diag, info),
             isDebugActive: () => !!vscode.debug.activeDebugSession
+        });
+        this._svdManager = new SvdManager({
+            vscode,
+            context,
+            cacheKeys: CACHE_KEYS,
+            t: (key, params) => this._t(key, params),
+            getChipInfo: () => this._chipInfoService.info,
+            onStatus: status => this._webviewView?.webview.postMessage({ type: 'svdStatus', ...status })
         });
         this._agentService = new AgentOrchestrator({
             Bridge: AgentBridge,
@@ -357,23 +380,26 @@ class MainViewProvider {
             quickPick.onDidHide(() => quickPick.dispose());
             quickPick.show();
         };
+        this.commandHandlers['mcu-vscode.downloadOfficialSvd'] = () => this._svdManager.downloadOfficial();
+        this.commandHandlers['mcu-vscode.selectExistingSvd'] = () => this._svdManager.selectExisting();
+        this.commandHandlers['mcu-vscode.switchWorkspaceSvd'] = () => this._svdManager.switchBinding();
         // 4. 启动调试（核心修改4：处理TypeScript类型匹配+路径清洗）
         this.commandHandlers['mcu-vscode.debug'] = async (resource) => {
+            let probePrepared = false;
             try {
                 if (this._agentReadRunning) {
                     vscode.window.showWarningMessage(this._t('msg.agentReadBusy'));
                     return false;
                 }
-                if (this._debugStarting) {
+                if (this._debugCommandPending || this._debugStarting) {
                     vscode.window.showWarningMessage(this._t('msg.debugBusy'));
                     return false;
                 }
-                this._debugStarting = true;
+                this._debugCommandPending = true;
                 console.log('主进程执行启动调试命令');
                 let elfPath = this._context.workspaceState.get(CACHE_KEYS.elfPath);
                 const debuggerCfg = this._context.workspaceState.get(CACHE_KEYS.debugger);
                 const mcuCore = this._context.workspaceState.get(CACHE_KEYS.mcuCore);
-                let svdPath = this._context.workspaceState.get(CACHE_KEYS.svdPath);
                 if (!elfPath || !debuggerCfg || !mcuCore) {
                     vscode.window.showErrorMessage(this._t('msg.configIncomplete'));
                     return false;
@@ -384,7 +410,6 @@ class MainViewProvider {
                 }
                 // 修复类型错误：处理 undefined 情况，用空字符串兜底
                 elfPath = cleanWindowsPath(elfPath);
-                svdPath = cleanWindowsPath(svdPath || ''); // 关键修复：解决 svdPath 可能为 undefined 的问题
                 const { folder: workspaceFolder } = this._commandContext(resource);
                 if (!workspaceFolder) {
                     vscode.window.showErrorMessage(this._t('msg.openWorkspaceForDebug'));
@@ -392,8 +417,12 @@ class MainViewProvider {
                 }
                 // 与下载共用同一个 OpenOCD 路径配置，避免 OpenOCD 不在 PATH 时调试失败
                 const configuredOpenOcdPath = vscode.workspace.getConfiguration('emberprobe').get('openocdPath', 'openocd');
-                const openocdPath = await this._resolveOpenOcdPath(configuredOpenOcdPath);
+                const [resolvedSvdPath, openocdPath] = await Promise.all([
+                    this._svdManager.currentPath(workspaceFolder),
+                    this._resolveOpenOcdPath(configuredOpenOcdPath)
+                ]);
                 if (!openocdPath) return false;
+                const svdPath = cleanWindowsPath(resolvedSvdPath);
                 const launch = openocdScripts.resolveOpenOcdLaunch(openocdPath, debuggerCfg, mcuCore);
                 const debugConfig = {
                     type: 'cortex-debug',
@@ -412,12 +441,19 @@ class MainViewProvider {
                     // Cortex-Debug 也会调用 OpenOCD 的 flash 算法，保留 work-area 但开启备份恢复。
                     openOCDLaunchCommands: [
                         'foreach _ep_target [target names] { $_ep_target configure -work-area-backup 1 }'
-                    ],
-                    svdFile: svdPath || undefined
+                    ]
                 };
+                if (svdPath) debugConfig.svdFile = svdPath;
+                const cortexTools = resolveCortexToolchainForWorkspace(vscode, workspaceFolder);
+                if (cortexTools?.objdumpPath) debugConfig.objdumpPath = cortexTools.objdumpPath;
+                await this.prepareForCortexDebug(workspaceFolder);
+                probePrepared = true;
+                this._debugStarting = true;
                 const started = await vscode.debug.startDebugging(workspaceFolder, debugConfig);
                 if (!started) {
                     vscode.window.showErrorMessage(this._t('msg.debugStartFailed'));
+                    if (this._debugStarting) this._debugStarting = false;
+                    await this.restoreSamplingAfterDebug();
                     return false;
                 }
                 return true;
@@ -426,16 +462,25 @@ class MainViewProvider {
                 const errorMsg = err.message;
                 console.error('调试启动失败：', errorMsg);
                 vscode.window.showErrorMessage(this._t('msg.debugFailed', { error: errorMsg }));
+                if (probePrepared) {
+                    if (this._debugStarting) this._debugStarting = false;
+                    await this.restoreSamplingAfterDebug();
+                }
                 throw err; // 上抛给消息分发器，向 Webview 反馈 commandError 而非 commandSuccess
             }
             finally {
-                this._debugStarting = false;
+                if (this._debugStarting) this._debugStarting = false;
+                this._debugCommandPending = false;
             }
         };
         // 6. 下载程序（核心修改5：生成命令时清洗路径）
         this.commandHandlers['mcu-vscode.download'] = async (resource) => {
             if (this._downloadRunning) {
                 vscode.window.showWarningMessage(this._t('msg.downloadBusy'));
+                return false;
+            }
+            if (this._debugStarting || this._debugBridge.hasAnySession || vscode.debug.activeDebugSession?.type === 'cortex-debug') {
+                vscode.window.showWarningMessage(this._t('msg.debugBusyForDownload'));
                 return false;
             }
             if (this._agentReadRunning) {
@@ -488,8 +533,10 @@ class MainViewProvider {
             }
         };
     }
-    _configurationSnapshot() {
-        return this._configurationStore.snapshot();
+    async _configurationSnapshot() {
+        const snapshot = this._configurationStore.snapshot();
+        snapshot.svd = await this._svdManager.currentPath();
+        return snapshot;
     }
     _workspacePath(value, extension) {
         return this._configurationStore.workspacePath(value, extension);
@@ -497,7 +544,15 @@ class MainViewProvider {
     async _setAgentConfiguration(values) {
         // openocdPath 可把探针调用引向任意可执行文件，禁止经 Agent Bridge 修改；由用户在设置或侧边栏更改
         assertAgentSettable(values);
-        return this._configurationStore.update(values);
+        const updated = await this._configurationStore.update(values);
+        if (Object.hasOwn(values || {}, 'svd')) {
+            const folder = this._svdManager.workspaceForElf();
+            if (folder) {
+                if (updated.svd) await this._svdManager.importAndBind(updated.svd, folder, this._svdManager.identityFor(folder), { source: 'agent-workspace', originalPath: updated.svd });
+                else await this._svdManager.library.bind(folder.uri, '');
+            }
+        }
+        return this._configurationSnapshot();
     }
     _focusedLivePanel() {
         return selectFocusedPanel(this._livePanels);
@@ -801,7 +856,7 @@ class MainViewProvider {
             return result;
         } finally {
             if (temporary) {
-                try { session.stop(); } catch { /* ignore */ }
+                try { await session.stop(); } catch { /* ignore */ }
                 if (this._agentReadSession === session) this._agentReadSession = null;
                 this._agentReadRunning = false;
                 if (this._agentReadDelayResolve) this._agentReadDelayResolve();
@@ -935,11 +990,18 @@ class MainViewProvider {
     // 保留 _agentWritePlan 的全部安全校验（DWARF 类型已知、目标地址在 .data/.bss 可写段内）。
     // 仅在实时采样运行时允许写入，直接复用采样的 Tcl 会话。
     async _writeUiVariable(name, value) {
-        if (!this._liveWatchRunning || !this._liveSession) {
+        const dapSession = this._debugBridge.canWrite ? this._debugBridge : null;
+        const session = dapSession || (this._liveWatchRunning ? this._liveSession : null);
+        if (!session) {
             throw Object.assign(new Error(this._t('sb.writeNeedSampling')), { i18nKey: 'sb.writeNeedSampling' });
         }
         const plan = this._agentWritePlan([{ name, value }], { refreshSymbols: false });
-        return this._executeWritePlan(this._liveSession, 'active-sampling', plan);
+        if (dapSession) this._postConsumerStatuses(dapSession.status({ mode: 'debug-paused-writing', key: 'live.dapWriting', canWrite: false }));
+        try {
+            return await this._executeWritePlan(session, dapSession ? 'cortex-debug-dap' : 'active-sampling', plan);
+        } finally {
+            if (dapSession) this._postConsumerStatuses(dapSession.status());
+        }
     }
     async _agentWritePermission(params) {
         const action = String(params?.action || 'status');
@@ -1107,14 +1169,7 @@ class MainViewProvider {
             this._livePanels.delete(panelId);
             this._rejectPanelCsvExports(panelId);
             this._invalidateConsumerTypes();
-            if (this._liveWatchRunning) {
-                if (!this._livePanels.size && !(this._webviewView && this._webviewView.visible)) this.stopLiveWatch();
-                else {
-                    const active = this._activeReadPlan();
-                    if (active.length && this._liveSession) this._liveSession.setWatch(active);
-                    else if (!active.length) this.stopLiveWatch();
-                }
-            }
+            this._refreshSamplingPlan().catch(() => {});
         });
         panel.webview.onDidReceiveMessage(async (message) => {
             try {
@@ -1146,11 +1201,7 @@ class MainViewProvider {
                         await this._context.workspaceState.update(watchKey, message.items || []);
                         this._invalidateConsumerTypes();
                         this._pruneSampleMap(entry.latestSamples, watchKey);
-                        if (this._liveSession) {
-                            const active = this._activeReadPlan();
-                            if (active.length) this._liveSession.setWatch(active);
-                            else this.stopLiveWatch();
-                        }
+                        await this._refreshSamplingPlan();
                         break;
                     case 'start':
                         await this._context.workspaceState.update(watchKey, message.items || []);
@@ -1232,7 +1283,17 @@ class MainViewProvider {
     }
     _postConsumerStatuses(payload, error = false) {
         const p = typeof payload === 'string' ? { message: payload } : (payload || {});
-        const message = { type: 'liveStatus', running: this._liveWatchRunning, ...p, error };
+        const message = {
+            type: 'liveStatus',
+            running: this._samplingIntent,
+            mode: this._liveWatchRunning ? 'standalone-sampling' : (this._samplingIntent ? 'standalone-pending' : 'stopped'),
+            intentEnabled: this._samplingIntent,
+            canRead: this._liveWatchRunning,
+            canWrite: this._liveWatchRunning,
+            source: this._liveWatchRunning ? 'openocd' : 'none',
+            ...p,
+            error
+        };
         for (const entry of this._livePanels.values()) entry.post(message);
         this._webviewView?.webview.postMessage(message);
     }
@@ -1249,8 +1310,13 @@ class MainViewProvider {
         const post = entry.post;
         post({ type: 'watchList', items: this._scalarWatchList(entry.watchKey) });
         post({ type: 'liveStatus', ...(this._agentSamplingStatus || {
-            running: this._liveWatchRunning,
-            key: this._liveWatchRunning ? 'sb.sampling' : 'sb.stopped'
+            running: this._samplingIntent,
+            intentEnabled: this._samplingIntent,
+            canRead: this._liveWatchRunning || this._debugBridge.canRead,
+            canWrite: this._liveWatchRunning || this._debugBridge.canWrite,
+            mode: this._debugBridge.hasSession ? this._debugBridge.status().mode : (this._liveWatchRunning ? 'standalone-sampling' : 'stopped'),
+            source: this._debugBridge.hasSession ? 'dap' : (this._liveWatchRunning ? 'openocd' : 'none'),
+            key: this._debugBridge.hasSession ? this._debugBridge.status().key : (this._liveWatchRunning ? 'sb.sampling' : 'sb.stopped')
         }) });
         if (entry.latestSamples.size) {
             const now = Date.now();
@@ -1273,8 +1339,13 @@ class MainViewProvider {
             post({ type: 'availableVariables', symbols: [], errorKey: error.i18nKey, params: error.i18nParams, error: error.message });
         }
         post({ type: 'liveStatus', ...(this._agentSamplingStatus || {
-            running: this._liveWatchRunning,
-            key: this._liveWatchRunning ? 'sb.sampling' : 'sb.stopped'
+            running: this._samplingIntent,
+            intentEnabled: this._samplingIntent,
+            canRead: this._liveWatchRunning || this._debugBridge.canRead,
+            canWrite: this._liveWatchRunning || this._debugBridge.canWrite,
+            mode: this._debugBridge.hasSession ? this._debugBridge.status().mode : (this._liveWatchRunning ? 'standalone-sampling' : 'stopped'),
+            source: this._debugBridge.hasSession ? 'dap' : (this._liveWatchRunning ? 'openocd' : 'none'),
+            key: this._debugBridge.hasSession ? this._debugBridge.status().key : (this._liveWatchRunning ? 'sb.sampling' : 'sb.stopped')
         }) });
         if (this._latestSidebarSamples.size) {
             const now = Date.now();
@@ -1332,9 +1403,51 @@ class MainViewProvider {
     }
     _setLiveInterval(intervalMs) {
         const value = validation.clampInteger(intervalMs, 100, 20, 10000);
+        this._liveIntervalMs = value;
         if (this._liveSession) this._liveSession.setIntervalMs(value);
         this._postLive({ type: 'liveInterval', intervalMs: value });
         return value;
+    }
+
+    _handleRawSamples(samples, t) {
+        const types = this._getCachedConsumerTypes();
+        for (const entry of this._livePanels.values()) {
+            const decoded = this._liveWatchService.decodeConsumerSamples(
+                samples, t, types.graphs.get(entry.watchKey), this._compositeMap(entry.watchKey), entry.latestSamples
+            );
+            if (!entry.ready) continue;
+            if (decoded.scalarSamples.length) entry.post({ type: 'liveSample', samples: decoded.scalarSamples, t });
+            if (decoded.compositeSamples.length) entry.post({ type: 'liveCompositeSample', samples: decoded.compositeSamples, t });
+        }
+        const sidebar = this._liveWatchService.decodeConsumerSamples(
+            samples, t, types.sidebar, this._compositeMap(CACHE_KEYS.sidebarWatchList), this._latestSidebarSamples
+        );
+        if (sidebar.scalarSamples.length) this._webviewView?.webview.postMessage({ type: 'liveSample', samples: sidebar.scalarSamples, t });
+        if (sidebar.compositeSamples.length) this._webviewView?.webview.postMessage({ type: 'liveCompositeSample', samples: sidebar.compositeSamples, t });
+    }
+
+    async _refreshSamplingPlan() {
+        const active = this._activeReadPlan();
+        if (this._debugBridge.hasSession) {
+            const planKey = active.map(item => `${item.name}:${item.address}:${item.size}`).join('|');
+            this._debugBridge.setIntent(this._samplingIntent);
+            if (planKey !== this._debugReadPlanKey) {
+                this._debugReadPlanKey = planKey;
+                this._debugBridge.refreshSnapshot();
+            }
+            if (!active.length && this._samplingIntent) this._postConsumerStatuses(this._debugBridge.status({ key: 'live.needVar' }));
+            return;
+        }
+        if (this._liveSession) {
+            if (active.length) this._liveSession.setWatch(active);
+            else {
+                this.stopLiveWatch({ preserveIntent: true });
+                this._postConsumerStatuses({ key: 'live.needVar' });
+            }
+            return;
+        }
+        if (this._samplingIntent && active.length && !this._debugStarting && !this._debugCommandPending) await this.startLiveWatch(undefined, this._liveIntervalMs, 'refresh');
+        else if (this._samplingIntent && !active.length) this._postConsumerStatuses({ key: 'live.needVar' });
     }
     _pruneSampleMap(map, keys) {
         const names = new Set();
@@ -1348,12 +1461,24 @@ class MainViewProvider {
         if (this._chipInfoRunning) throw Object.assign(new Error(this._t('live.chipReading')), { i18nKey: 'live.chipReading' });
         if (this._agentReadRunning) throw Object.assign(new Error(this._t('live.agentReading')), { i18nKey: 'live.agentReading' });
         if (this._liveStarting) throw Object.assign(new Error(this._t('live.starting')), { i18nKey: 'live.starting' });
-        if (this._debugStarting || vscode.debug.activeDebugSession) throw Object.assign(new Error(this._t('live.debugActive')), { i18nKey: 'live.debugActive' });
         const debuggerCfg = this._context.workspaceState.get(CACHE_KEYS.debugger);
         const mcuCore = this._context.workspaceState.get(CACHE_KEYS.mcuCore);
         if (!debuggerCfg || !mcuCore) throw Object.assign(new Error(this._t('live.needConfig')), { i18nKey: 'live.needConfig' });
+        this._samplingIntent = true;
+        this._debugBridge.setIntent(true);
+        if (intervalMs !== undefined) this._setLiveInterval(intervalMs);
         const activeItems = this._activeReadPlan();
-        if (!activeItems.length) throw Object.assign(new Error(this._t('live.needVar')), { i18nKey: 'live.needVar' });
+        if (this._debugBridge.hasSession || vscode.debug.activeDebugSession?.type === 'cortex-debug' || this._debugStarting || this._debugCommandPending) {
+            const status = this._debugBridge.hasSession
+                ? this._debugBridge.status(activeItems.length ? {} : { key: 'live.needVar' })
+                : { mode: this._debugStarting || this._debugCommandPending ? 'debug-running-waiting' : 'debug-session-conflict', key: this._debugStarting || this._debugCommandPending ? 'live.debugWaiting' : 'live.debugConflict', source: 'dap', canRead: false, canWrite: false, snapshotReady: false };
+            this._postConsumerStatuses(status);
+            return;
+        }
+        if (!activeItems.length) {
+            this._postConsumerStatuses({ key: 'live.needVar' });
+            return;
+        }
         this._liveConsumers.add('graph');
         this._liveConsumers.add('sidebar');
         if (this._liveWatchRunning && this._liveSession) {
@@ -1375,20 +1500,7 @@ class MainViewProvider {
             intervalMs: validation.clampInteger(intervalMs || cfg.get('sampleIntervalMs', 100), 100, 20, 10000)
         }, {
             onSample: (samples, t) => {
-                const types = this._getCachedConsumerTypes();
-                for (const entry of this._livePanels.values()) {
-                    const decoded = this._liveWatchService.decodeConsumerSamples(
-                        samples, t, types.graphs.get(entry.watchKey), this._compositeMap(entry.watchKey), entry.latestSamples
-                    );
-                    if (!entry.ready) continue;
-                    if (decoded.scalarSamples.length) entry.post({ type: 'liveSample', samples: decoded.scalarSamples, t });
-                    if (decoded.compositeSamples.length) entry.post({ type: 'liveCompositeSample', samples: decoded.compositeSamples, t });
-                }
-                const sidebar = this._liveWatchService.decodeConsumerSamples(
-                    samples, t, types.sidebar, this._compositeMap(CACHE_KEYS.sidebarWatchList), this._latestSidebarSamples
-                );
-                if (sidebar.scalarSamples.length) this._webviewView?.webview.postMessage({ type: 'liveSample', samples: sidebar.scalarSamples, t });
-                if (sidebar.compositeSamples.length) this._webviewView?.webview.postMessage({ type: 'liveCompositeSample', samples: sidebar.compositeSamples, t });
+                this._handleRawSamples(samples, t);
             },
             onStatus: (msg) => this._postConsumerStatuses(msg),
             onError: (msg) => this._postLive({ type: 'liveError', message: msg }),
@@ -1411,7 +1523,7 @@ class MainViewProvider {
         } catch (error) {
             this._liveStarting = false;
             if (this._liveSession === session) {
-                try { session.stop(); } catch (e) { /* ignore */ }
+                try { await session.stop(); } catch (e) { /* ignore */ }
                 this._liveSession = null;
                 this._liveWatchRunning = false;
             }
@@ -1420,26 +1532,97 @@ class MainViewProvider {
             throw error;
         }
     }
-    stopLiveWatch() {
+    stopLiveWatch(options = {}) {
+        const preserveIntent = !!options.preserveIntent;
+        let stopped = null;
         this._liveConsumers.clear();
-        if (this._liveSession) { try { this._liveSession.stop(); } catch (e) { /* ignore */ } this._liveSession = null; }
+        if (this._liveSession) { try { stopped = this._liveSession.stop(); } catch (e) { /* ignore */ } this._liveSession = null; }
         this._liveWatchRunning = false;
-        this._postConsumerStatuses({ key: 'sb.stopped' });
+        if (!preserveIntent) {
+            this._samplingIntent = false;
+            this._debugBridge.setIntent(false);
+        }
+        this._postConsumerStatuses(preserveIntent && this._debugBridge.hasSession ? this._debugBridge.status() : { key: preserveIntent ? 'live.restoring' : 'sb.stopped' });
+        return stopped;
     }
     // 仅在采样进行中时停止；用于调试会话起止等外部事件触发的自动清理
     stopLiveWatchIfRunning() {
-        if (this._liveWatchRunning) this.stopLiveWatch();
+        if (this._liveWatchRunning) this.stopLiveWatch({ preserveIntent: true });
+    }
+    async prepareForCortexDebug(folder) {
+        this._debugBridge.setWorkspace(folder || this._commandContext().folder);
+        const agentStopped = this.stopAgentReadIfRunning();
+        if (agentStopped) await agentStopped;
+        if (this._liveWatchRunning || this._liveSession) {
+            const stopped = this.stopLiveWatch({ preserveIntent: true });
+            if (stopped) await stopped;
+            this._postConsumerStatuses({ mode: 'debug-running-waiting', key: 'live.debugWaiting', source: 'dap', canRead: false, canWrite: false, snapshotReady: false });
+        } else if (this._samplingIntent) {
+            this._postConsumerStatuses({ mode: 'debug-running-waiting', key: 'live.debugWaiting', source: 'dap', snapshotReady: false });
+        }
+    }
+    handleDebugSessionStart(session) {
+        if (!session || session.type !== 'cortex-debug') return;
+        this._debugReadPlanKey = this._activeReadPlan().map(item => `${item.name}:${item.address}:${item.size}`).join('|');
+        this._debugBridge.setWorkspace(this._commandContext().folder);
+        this._debugBridge.attach(session);
+        this._debugBridge.setIntent(this._samplingIntent);
+    }
+    handleDebugAdapterMessage(session, message) {
+        this._debugBridge.handleMessage(session, message);
+    }
+    async handleDebugSessionTerminate(session) {
+        if (!session || session.type !== 'cortex-debug') return;
+        this._debugBridge.detach(session);
+        if (this._debugBridge.hasSession) return;
+        this._debugReadPlanKey = '';
+        await this.restoreSamplingAfterDebug();
+    }
+    async restoreSamplingAfterDebug() {
+        if (this._debugBridge.hasAnySession) {
+            this._postConsumerStatuses(this._debugBridge.status());
+            return;
+        }
+        if (!this._samplingIntent) {
+            this._postConsumerStatuses({ mode: 'stopped', key: 'sb.stopped', source: 'none' });
+            return;
+        }
+        this._postConsumerStatuses({ mode: 'restoring', key: 'live.restoring', source: 'openocd', canRead: false, canWrite: false });
+        await new Promise(resolve => setTimeout(resolve, 350));
+        if (!this._samplingIntent || this._debugBridge.hasAnySession) return;
+        try {
+            await this.startLiveWatch(undefined, this._liveIntervalMs, 'restore');
+        } catch (error) {
+            this._postConsumerStatuses({ mode: 'restore-failed', key: error.i18nKey, message: error.message, source: 'none' }, true);
+        }
+    }
+    disposeDebugBridge() {
+        this._debugBridge.dispose();
+    }
+    shutdown() {
+        if (this._shutdownPromise) return this._shutdownPromise;
+        this._shutdownPromise = (async () => {
+            const stopped = this.stopLiveWatch();
+            if (stopped) await stopped;
+            this.disposeDebugBridge();
+            const agentStopped = this.stopAgentReadIfRunning();
+            if (agentStopped) await agentStopped;
+            await this.stopAgentBridge().catch(() => {});
+        })();
+        return this._shutdownPromise;
     }
     stopAgentReadIfRunning() {
-        if (!this._agentReadRunning && !this._agentReadSession) return;
+        if (!this._agentReadRunning && !this._agentReadSession) return null;
         this._agentReadCancelled = true;
         this._agentReadRunning = false;
         if (this._agentReadDelayResolve) this._agentReadDelayResolve();
+        let stopped = null;
         if (this._agentReadSession) {
-            try { this._agentReadSession.stop(); } catch { /* ignore */ }
+            try { stopped = this._agentReadSession.stop(); } catch { /* ignore */ }
             this._agentReadSession = null;
         }
         this._postAgentSampling(false, 'live.agentStopped');
+        return stopped;
     }
     // 推送芯片信息状态与（可选的）结果到侧边栏
     _postChipInfo(status, info) {
@@ -1526,6 +1709,7 @@ class MainViewProvider {
                     for (const progressMessage of this._recentProgress) webviewView.webview.postMessage(progressMessage);
                     this._syncSidebarTarget((message) => webviewView.webview.postMessage(message));
                     this._syncChipInfo((message) => webviewView.webview.postMessage(message));
+                    this._svdManager.syncStatus().catch(error => console.error('SVD 状态检查失败：', error.message));
                     webviewView.webview.postMessage({ type: 'openocdStatus', ...this._openOcdStatusService.status });
                     this.refreshOpenOcdStatus(false);
                     this.refreshSkillStatus().catch(error => console.error('Agent Skills 状态检查失败：', error.message));
@@ -1555,11 +1739,7 @@ class MainViewProvider {
                     await this._context.workspaceState.update(CACHE_KEYS.sidebarWatchList, items);
                     this._invalidateConsumerTypes();
                     this._pruneSampleMap(this._latestSidebarSamples, [CACHE_KEYS.sidebarWatchList, CACHE_KEYS.sidebarWriteList]);
-                    if (this._liveSession) {
-                        const active = this._activeReadPlan();
-                        if (active.length) this._liveSession.setWatch(active);
-                        else this.stopLiveWatch();
-                    }
+                    await this._refreshSamplingPlan();
                     webviewView.webview.postMessage({ type: 'sidebarWatchList', items });
                     break;
                 }
@@ -1569,11 +1749,7 @@ class MainViewProvider {
                     this._invalidateConsumerTypes();
                     this._pruneSampleMap(this._latestSidebarSamples, [CACHE_KEYS.sidebarWatchList, CACHE_KEYS.sidebarWriteList]);
                     // 写入列表变化同步采样读取计划，使新增变量立即开始实时同步
-                    if (this._liveSession) {
-                        const active = this._activeReadPlan();
-                        if (active.length) this._liveSession.setWatch(active);
-                        else this.stopLiveWatch();
-                    }
+                    await this._refreshSamplingPlan();
                     webviewView.webview.postMessage({ type: 'sidebarWriteList', items });
                     break;
                 }
@@ -1601,18 +1777,23 @@ class MainViewProvider {
                 case 'liveToggle': {
                     try {
                         if (this._agentReadRunning) this.stopAgentReadIfRunning();
-                        else if (this._liveWatchRunning) this.stopLiveWatch();
+                        else if (this._samplingIntent) this.stopLiveWatch();
                         else {
                             const items = this._context.workspaceState.get(CACHE_KEYS.sidebarWatchList) || [];
                             await this.startLiveWatch(items, message.intervalMs, 'sidebar');
                         }
                     } catch (error) {
-                        webviewView.webview.postMessage({ type: 'liveStatus', running: false, key: error.i18nKey, params: error.i18nParams, message: error.message, error: true });
+                        this._postConsumerStatuses({ key: error.i18nKey, params: error.i18nParams, message: error.message }, true);
                     }
                     break;
                 }
                 case 'readChipInfo': {
                     await this.readChipInfoAction();
+                    await this._svdManager.syncStatus();
+                    break;
+                }
+                case 'cancelSvdDownload': {
+                    this._svdManager.cancel();
                     break;
                 }
                 case 'copyText': {

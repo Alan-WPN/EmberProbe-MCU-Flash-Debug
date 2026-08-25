@@ -1,7 +1,7 @@
 "use strict";
 // 通过 OpenOCD 一次性读取芯片基本信息（小栏目定位：快速确认连接状态、芯片系列、调试链路与运行状态）。
-// 仅 init、不复位。读取身份信息（Device ID/Flash/UID）时若芯片在运行会短暂 halt→读取→resume（H7 等运行态下读取不可靠）；
-// 运行信息(PC/SP/LR)仅在芯片“原本已暂停”时读取，绝不为展示它而暂停运行中的程序。读取完成后立即 shutdown。
+// 仅 init、不复位也不暂停运行目标。running 时只读当前 target 对应的身份寄存器；
+// 全家族候选地址扫描、flash probe 和 PC/SP/LR 仅在芯片原本已暂停时执行。读取完成后立即 shutdown。
 const { isSafeCfg, parseLine } = require("./openocdRunner");
 const { runOpenOcdOnce } = require("./services/openocdExec");
 
@@ -268,6 +268,39 @@ function formatUid(words) {
     return '0x' + words.map(w => (w >>> 0).toString(16).toUpperCase().padStart(8, '0')).join('');
 }
 
+function buildChipInfoCommands(target) {
+    const uidBase = uidBaseForTarget(target);
+    const idcodeBase = idcodeBaseForTarget(target);
+    const flashSizeBase = flashSizeBaseForTarget(target);
+    const preferredReads = [];
+    if (idcodeBase) preferredReads.push('catch { echo [mdw 0x' + idcodeBase.toString(16) + '] }');
+    if (flashSizeBase) preferredReads.push('catch { echo [mdw 0x' + flashSizeBase.toString(16) + '] }');
+    if (uidBase) preferredReads.push('catch { echo [mdw 0x' + uidBase.toString(16) + ' 3] }');
+    const exhaustiveReads = ['catch { flash probe 0 }'];
+    for (const a of ALL_IDCODE_ADDRS) exhaustiveReads.push('catch { echo [mdw 0x' + a.toString(16) + '] }');
+    for (const a of ALL_FLASHSIZE_ADDRS) exhaustiveReads.push('catch { echo [mdw 0x' + a.toString(16) + '] }');
+    for (const a of ALL_UID_ADDRS) exhaustiveReads.push('catch { echo [mdw 0x' + a.toString(16) + ' 3] }');
+    // 运行中的 H7 对调试状态切换更敏感：这里只访问当前 target 的已知寄存器，
+    // 不执行 flash probe、跨系列地址扫描或 halt/resume。原本已暂停时才允许完整探测。
+    const identityCmd = 'catch { if {[[target current] curstate] eq "halted"} { '
+        + exhaustiveReads.join('; ') + ' } else { ' + preferredReads.join('; ') + ' } }';
+    return [
+        'init',
+        'catch { poll }',
+        'catch { echo "EP_KV name [target current]" }',
+        'catch { echo "EP_KV state [[target current] curstate]" }',
+        'catch { echo "EP_KV endian [[target current] cget -endian]" }',
+        'catch { echo "EP_KV transport [transport select]" }',
+        `catch { echo [mdw ${CPUID_HEX}] }`,
+        `catch { echo [mdw 0x${ROM_PIDR4_ADDR.toString(16)} 4] }`,
+        `catch { echo [mdw 0x${ROM_PIDR0_ADDR.toString(16)} 4] }`,
+        `catch { echo [mdw 0x${ROM_CIDR_ADDR.toString(16)} 4] }`,
+        identityCmd,
+        'catch { if {[[target current] curstate] eq "halted"} { catch { echo [reg pc] }; catch { echo [reg sp] }; catch { echo [reg lr] } } }',
+        'shutdown'
+    ];
+}
+
 // 一次性读取芯片信息。options: { executable, probe, target, cwd }
 // 成功 resolve 结构化信息对象；连接/识别失败时 reject 并带排查线索。
 async function readChipInfo(vscode, options, onProgress) {
@@ -278,36 +311,10 @@ async function readChipInfo(vscode, options, onProgress) {
     const uidBase = uidBaseForTarget(options.target);
     const idcodeBase = idcodeBaseForTarget(options.target);
     const flashSizeBase = flashSizeBaseForTarget(options.target);
-    // 每条读取命令用 catch 包裹，保证单条失败不影响其余命令，最终 shutdown 干净退出。
-        // 身份信息（Device ID/Flash/UID）在运行态下（尤其 H7）读取不可靠：若芯片在运行，
-        // 则在本块内短暂 halt→读取→resume；原本已暂停则直接读。运行信息(PC/SP/LR)仍仅在“原本已暂停”时读取。
-        // 身份寄存器按全家族候选地址扫描（目标配置可能选错），收尾时按真实家族选值
-        const idReads = ['catch { flash probe 0 }'];
-        for (const a of ALL_IDCODE_ADDRS) idReads.push('catch { echo [mdw 0x' + a.toString(16) + '] }');
-        for (const a of ALL_FLASHSIZE_ADDRS) idReads.push('catch { echo [mdw 0x' + a.toString(16) + '] }');
-        for (const a of ALL_UID_ADDRS) idReads.push('catch { echo [mdw 0x' + a.toString(16) + ' 3] }');
-        // 一个 -c 内完成：记录原状态 → 若非 halted 则 halt → 读取 → 若曾 halt 则 resume（确保不把用户程序留在暂停态）
-        const identityCmd = 'catch { set o [[target current] curstate]; set h 0; if {$o ne "halted"} { if {![catch {halt}]} { set h 1 } }; '
-            + idReads.join('; ') + '; if {$h} { catch { resume } } }';
-        const cmds = [
-            'init',
-            'catch { poll }',
-            'catch { echo "EP_KV name [target current]" }',
-            'catch { echo "EP_KV state [[target current] curstate]" }',
-            'catch { echo "EP_KV endian [[target current] cget -endian]" }',
-            'catch { echo "EP_KV transport [transport select]" }',
-            `catch { echo [mdw ${CPUID_HEX}] }`,
-            // 厂商指纹：ROM 表 PIDR/CIDR 属调试地址空间，运行态可直接读取，无需 halt
-            `catch { echo [mdw 0x${ROM_PIDR4_ADDR.toString(16)} 4] }`,
-            `catch { echo [mdw 0x${ROM_PIDR0_ADDR.toString(16)} 4] }`,
-            `catch { echo [mdw 0x${ROM_CIDR_ADDR.toString(16)} 4] }`,
-            identityCmd,
-            // catch 会吞掉命令输出，寄存器行需 echo [...] 形式才能到达 stdout（仅 halted 时读取）
-            'catch { if {[[target current] curstate] eq "halted"} { catch { echo [reg pc] }; catch { echo [reg sp] }; catch { echo [reg lr] } } }',
-            'shutdown'
-        ];
-        report({ stage: 'start', message: '正在读取芯片信息…' });
-        const info = {
+    // running 分支不允许 halt/resume；宁可少展示信息，也不改变用户程序的调试状态。
+    const cmds = buildChipInfoCommands(options.target);
+    report({ stage: 'start', message: '正在读取芯片信息…' });
+    const info = {
             // 内核
             core: '', coreRevision: '', cpuid: '', implementer: '',
             // 芯片系列
@@ -320,15 +327,15 @@ async function readChipInfo(vscode, options, onProgress) {
             probeName: '', probeVersion: '', probe: '', transport: '', clock: '', voltage: '', targetName: '',
             // 运行信息
             targetState: '', haltReason: '', pc: '', sp: '', lr: ''
-        };
-        const errors = [];
-        const rawTail = [];
-        const rawAll = [];
-        // 全家族扫描的原始读数（地址 → 值），收尾时按真实家族选值
-        const idcReads = {}, flsReads = {}, uidReads = {};
-        let idcodeLog = ''; // OpenOCD flash 驱动自报的 device id（仅作最后回退）
-        let transportLog = '';
-        const handleLine = (raw) => {
+    };
+    const errors = [];
+    const rawTail = [];
+    const rawAll = [];
+    // 全家族扫描的原始读数（地址 → 值），收尾时按真实家族选值
+    const idcReads = {}, flsReads = {}, uidReads = {};
+    let idcodeLog = ''; // OpenOCD flash 驱动自报的 device id（仅作最后回退）
+    let transportLog = '';
+    const handleLine = (raw) => {
             const clean = raw;
             if (!clean) return;
             rawTail.push(clean);
@@ -523,7 +530,7 @@ function normalizeFlashSize(text) {
 }
 
 module.exports = {
-    readChipInfo, decodeCpuid, parseMdwWord, parseMdwDump, parseRegLine, parseKv,
+    readChipInfo, buildChipInfoCommands, decodeCpuid, parseMdwWord, parseMdwDump, parseRegLine, parseKv,
     splitIdcode, normalizeTransport, seriesFromTarget, seriesFromFlashDriver, uidBaseForTarget, idcodeBaseForTarget,
     flashSizeBaseForTarget, formatUid, normalizeFlashSize, decodeRomPidr, assessAuthenticity, deriveVendor, chooseIdcode,
     CORTEX_M_PARTS, IMPLEMENTERS,

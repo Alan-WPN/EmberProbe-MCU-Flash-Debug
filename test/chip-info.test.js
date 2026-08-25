@@ -1,6 +1,6 @@
 "use strict";
 const assert = require("assert");
-const { decodeCpuid, parseMdwWord, parseMdwDump, parseRegLine, parseKv, splitIdcode, normalizeTransport, seriesFromTarget, seriesFromFlashDriver, uidBaseForTarget, idcodeBaseForTarget, flashSizeBaseForTarget, formatUid, normalizeFlashSize, decodeRomPidr, assessAuthenticity, deriveVendor, chooseIdcode, ALL_IDCODE_ADDRS } = require("../src/chipInfo");
+const { buildChipInfoCommands, decodeCpuid, parseMdwWord, parseMdwDump, parseRegLine, parseKv, splitIdcode, normalizeTransport, seriesFromTarget, seriesFromFlashDriver, uidBaseForTarget, idcodeBaseForTarget, flashSizeBaseForTarget, formatUid, normalizeFlashSize, decodeRomPidr, assessAuthenticity, deriveVendor, chooseIdcode, ALL_IDCODE_ADDRS } = require("../src/chipInfo");
 
 // SCB CPUID 0x410FC241 → Cortex-M4 r0p1（ARM）
 const m4 = decodeCpuid(0x410FC241);
@@ -150,5 +150,20 @@ assert.strictEqual(chooseIdcode({ 0xe0042000: 0x00000000, 0x40015800: 0x0000ffff
 assert.strictEqual(chooseIdcode({}, 0xe0042000), null);
 // 候选地址集应覆盖经典/F0系/H7 三类 DBGMCU 地址
 assert.ok(ALL_IDCODE_ADDRS.includes(0xe0042000) && ALL_IDCODE_ADDRS.includes(0x40015800) && ALL_IDCODE_ADDRS.includes(0x5c001000));
+
+// 芯片信息读取不得改变运行目标状态。H7 running 分支只读本系列身份寄存器，
+// flash probe 与跨系列扫描只能位于原本 halted 的分支。
+const chipInfoCommands = buildChipInfoCommands("stm32h7x.cfg");
+const allChipInfoCommands = chipInfoCommands.join("\n");
+assert.ok(!/(?:^|[;{\s])halt(?:[;}\s]|$)/.test(allChipInfoCommands), "chip info must never halt a running target");
+assert.ok(!/(?:^|[;{\s])resume(?:[;}\s]|$)/.test(allChipInfoCommands), "chip info must never resume a target");
+const identityCommand = chipInfoCommands.find(command => command.includes("flash probe 0"));
+assert.ok(identityCommand && identityCommand.includes('curstate] eq "halted"'));
+const runningIdentityBranch = identityCommand.split("} else {")[1];
+assert.ok(runningIdentityBranch.includes("mdw 0x5c001000"));
+assert.ok(runningIdentityBranch.includes("mdw 0x1ff1e880"));
+assert.ok(runningIdentityBranch.includes("mdw 0x1ff1e800 3"));
+assert.ok(!runningIdentityBranch.includes("flash probe 0"));
+assert.ok(!runningIdentityBranch.includes("mdw 0xe0042000"), "H7 running branch must not scan classic STM32 addresses");
 
 console.log("Chip info tests passed");

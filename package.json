@@ -37,10 +37,14 @@
     "onStartupFinished",
     "workspaceContains:.agents/skills/mcu-live-watch/SKILL.md",
     "onView:mcu-vscode.mainView",
+    "onDebugResolve:cortex-debug",
     "onCommand:mcu-vscode.folderDebug",
     "onCommand:mcu-vscode.folderDownload",
     "onCommand:mcu-vscode.openLiveWatch",
     "onCommand:mcu-vscode.manageAgentSkills",
+    "onCommand:mcu-vscode.downloadOfficialSvd",
+    "onCommand:mcu-vscode.selectExistingSvd",
+    "onCommand:mcu-vscode.switchWorkspaceSvd",
     "onCommand:mcu-vscode.checkOpenOcd"
   ],
   "contributes": {
@@ -82,6 +86,18 @@
       {
         "command": "mcu-vscode.manageAgentSkills",
         "title": "EmberProbe: 管理 Agent Skills"
+      },
+      {
+        "command": "mcu-vscode.downloadOfficialSvd",
+        "title": "EmberProbe: 下载/配置官方 SVD"
+      },
+      {
+        "command": "mcu-vscode.selectExistingSvd",
+        "title": "EmberProbe: 选择已有 SVD"
+      },
+      {
+        "command": "mcu-vscode.switchWorkspaceSvd",
+        "title": "EmberProbe: 切换当前工作区 SVD"
       }
     ],
     "menus": {
@@ -156,7 +172,9 @@
     "package": "npx --yes @vscode/vsce@3.9.1 package --out dist/emberprobe.vsix"
   },
   "dependencies": {
-    "tar": "^7.5.20"
+    "fast-xml-parser": "^5.11.0",
+    "tar": "^7.5.20",
+    "yauzl": "^3.4.0"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
@@ -165,6 +183,7 @@
     "esbuild": "^0.28.1",
     "eslint": "^10.8.0",
     "prettier": "^3.9.6",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "yazl": "^3.3.1"
   }
 }

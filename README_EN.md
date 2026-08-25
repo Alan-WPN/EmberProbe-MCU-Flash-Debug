@@ -12,6 +12,8 @@ EmberProbe is a VS Code extension for Cortex-M development. Built on OpenOCD, it
 - Linux/macOS have no bundled package: install OpenOCD with your system package manager (e.g. `sudo apt install openocd`, `brew install openocd`) and point "Select OpenOCD" at it; on Linux, USB probes additionally require udev rules or group membership (see the [OpenOCD udev rules](https://github.com/openocd-org/openocd/blob/master/contrib/60-openocd.rules)).
 - Chip info readout: non-intrusively reads the chip core, Device ID, Flash size, UID, debug link, and run state via OpenOCD.
 - Live variable watch: non-intrusively reads Cortex-M RAM while the target runs; the sidebar offers a standalone value list, and multiple chart panels can keep independent watch lists and history buffers.
+- Cortex-Debug integration: debugging always uses an in-memory configuration and never reads or writes `launch.json`; a running target waits for a halt, a halted target is read/written through the same DAP session, and standalone sampling is restored according to the user's sampling intent.
+- Official SVD management: resolves the device from project/hardware information, downloads and validates the official Open-CMSIS-Pack DFP with progress, and stores deduplicated SVDs in a global library with per-workspace bindings.
 - Optionally installs eight Agent Skills covering firmware download and verification, live variable reads and writes, chip and fault inspection, ELF analysis, and configuration synchronization.
 
 ## Requirements
@@ -29,6 +31,8 @@ The sidebar lists all global/static variables of the current ELF; click a variab
 - Live writes: the sidebar can add scalars with reliable DWARF types in ELF writable sections to a write list; writes are enabled only while sampling is active and are verified by reading the value back after each write.
 - Limits: supports only Cortex-M and global/static variables at fixed addresses; sampling bandwidth is limited (~10–50 Hz). Multiple panels share sampling start/stop and interval state; memory use grows linearly with panel count, with `maxSamples` applied per panel.
 - Related settings: `emberprobe.tclPort`, `emberprobe.sampleIntervalMs`, `emberprobe.maxSamples`.
+
+During debugging, Start preserves sampling intent without sending a pause request. A running target shows “waiting for pause”; once halted, DAP sampling runs no faster than 250 ms and validated writes become available. Use the SVD controls in the chip card to choose an existing file or download an official one. New bindings apply to the next debug session.
 
 ## Agent Skills
 

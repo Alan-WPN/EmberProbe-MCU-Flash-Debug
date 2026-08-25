@@ -106,10 +106,12 @@ class LiveWatchSession {
         this.writeAltTried = false;
         this._lastReadError = '';
         this._notifiedError = '';
+        this._sampleErrorActive = false;
         this.connectionFailed = false;
         this.connectionError = null;
         this._startReject = null; // start() 进行中时捕获的 reject，用于单通道上报连接期失败
         this._openOcdLogTail = [];
+        this._stopPromise = null;
     }
 
     setWatch(list) { this.watch = Array.isArray(list) ? list.slice() : []; }
@@ -125,7 +127,10 @@ class LiveWatchSession {
     }
 
     _status(msg) { if (this.handlers.onStatus) this.handlers.onStatus(msg); }
-    _error(msg) { if (this.handlers.onError) this.handlers.onError(msg); }
+    _error(msg) {
+        this._sampleErrorActive = true;
+        if (this.handlers.onError) this.handlers.onError(msg);
+    }
     // 采样中拔出调试器的致命日志特征（USB 读写失败 / 设备丢失），用于自动停止采样
     _isFatalProbeLog(line) { return /WriteFile|ReadFile|LIBUSB_ERROR_(?:NO_DEVICE|IO|PIPE)|error (?:writing|reading) data|target communication error/i.test(String(line || '')); }
 
@@ -225,6 +230,24 @@ class LiveWatchSession {
         } finally {
             this._startReject = null;
         }
+    }
+
+    waitForExit(timeoutMs = 1200) {
+        const child = this.child;
+        if (!child || child.exitCode !== null) return Promise.resolve(true);
+        return new Promise((resolve) => {
+            let settled = false;
+            const finish = (closed) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                child.removeListener('close', onClose);
+                resolve(closed);
+            };
+            const onClose = () => finish(true);
+            const timer = setTimeout(() => finish(false), Math.max(100, Number(timeoutMs) || 1200));
+            child.once('close', onClose);
+        });
     }
 
     _connectWithRetry(port, timeoutMs) {
@@ -511,7 +534,14 @@ class LiveWatchSession {
         try {
             const { samples, ok } = await this._readItems(this.watch, t);
             if (this.handlers.onSample) this.handlers.onSample(samples, t);
-            if (ok === 0 && this._lastReadError && this._lastReadError !== this._notifiedError) {
+            if (ok === this.watch.length && this._sampleErrorActive) {
+                // 芯片复位会造成一次短暂的 MEM-AP 读取失败；后续完整采样成功即恢复正常状态，
+                // 避免错误提示和灰显一直粘滞到用户手动重启采样。
+                this._sampleErrorActive = false;
+                this._lastReadError = '';
+                this._notifiedError = '';
+                this._status({ key: 'sb.sampling' });
+            } else if (ok === 0 && this._lastReadError && this._lastReadError !== this._notifiedError) {
                 this._notifiedError = this._lastReadError;
                 this._error('读取内存失败：' + this._lastReadError + '（运行中读取失败时可尝试降低采样率或确认目标状态）');
             }
@@ -522,22 +552,66 @@ class LiveWatchSession {
         }
     }
 
-    stop() {
+    stop(timeoutMs = 1200) {
+        if (this._stopPromise) return this._stopPromise;
+        const child = this.child;
+        const socket = this.socket;
+        const childExited = child ? this.waitForExit(timeoutMs) : Promise.resolve(true);
         this.stopped = true;
         this.connectionFailed = true;
         if (this.timer) { clearInterval(this.timer); this.timer = null; }
         this._rejectQueue(new Error('采样已停止'));
-        if (this.socket && !this.socket.destroyed) {
-            try { this.socket.write('shutdown' + SUB); } catch (e) { /* ignore */ }
-            try { this.socket.destroy(); } catch (e) { /* ignore */ }
-        }
-        this.socket = null;
         if (this.connectingSocket && !this.connectingSocket.destroyed) {
             try { this.connectingSocket.destroy(); } catch (e) { /* ignore */ }
         }
         this.connectingSocket = null;
-        if (this.child && !this.child.killed) { try { this.child.kill(); } catch (e) { /* ignore */ } }
-        this.child = null;
+        const sendShutdown = new Promise(resolve => {
+            if (!socket || socket.destroyed) return resolve(false);
+            let settled = false;
+            const finish = sent => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                resolve(sent);
+            };
+            const timer = setTimeout(() => finish(false), 150);
+            try { socket.write('shutdown' + SUB, () => finish(true)); }
+            catch (e) { finish(false); }
+        });
+        this._stopPromise = (async () => {
+            const childRunning = () => !!child && child.exitCode == null && child.signalCode == null;
+            const sent = await sendShutdown;
+            if (!sent && childRunning()) {
+                try { child.kill(); } catch (e) { /* ignore */ }
+            }
+            let closed = await childExited;
+            if (!closed && childRunning()) {
+                try { child.kill(); } catch (e) { /* ignore */ }
+                closed = await new Promise(resolve => {
+                    let settled = false;
+                    const finish = value => {
+                        if (settled) return;
+                        settled = true;
+                        clearTimeout(timer);
+                        child.removeListener('close', onClose);
+                        resolve(value);
+                    };
+                    const onClose = () => finish(true);
+                    const timer = setTimeout(() => finish(false), 400);
+                    child.once('close', onClose);
+                });
+            }
+            if (!closed && childRunning()) {
+                try { child.kill('SIGKILL'); } catch (e) { /* ignore */ }
+            }
+            if (socket && !socket.destroyed) {
+                try { socket.destroy(); } catch (e) { /* ignore */ }
+            }
+            if (this.socket === socket) this.socket = null;
+            if (this.child === child && (closed || child?.exitCode !== null)) this.child = null;
+            return closed;
+        })();
+        return this._stopPromise;
     }
 }
 

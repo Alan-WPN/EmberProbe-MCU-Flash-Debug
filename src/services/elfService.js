@@ -30,6 +30,12 @@ class ElfService {
         let before;
         try {
             before = this.fs.statSync(elfPath);
+            if (
+                this.cache?.elfPath === elfPath &&
+                this.cache.mtimeMs === before.mtimeMs &&
+                this.cache.size === before.size
+            )
+                return this.cache.result;
             buffer = this.fs.readFileSync(elfPath);
             const after = this.fs.statSync(elfPath);
             if (after.mtimeMs !== before.mtimeMs || after.size !== before.size) {
@@ -70,7 +76,7 @@ class ElfService {
             }
         }
         if (!typeMap || typeMap.size === 0) result.warnings.push(this.t("warn.noDwarf"));
-        this.cache = { elfPath, sha256, result };
+        this.cache = { elfPath, mtimeMs: before.mtimeMs, size: before.size, sha256, result };
         return result;
     }
 }
