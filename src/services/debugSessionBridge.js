@@ -4,6 +4,7 @@ const MIN_DAP_INTERVAL_MS = 250;
 const MAX_READ_BYTES = 4096;
 const SNAPSHOT_INITIAL_DELAY_MS = 180;
 const SNAPSHOT_RETRY_DELAYS_MS = Object.freeze([150, 300, 600, 1000]);
+const CONTROL_TIMEOUT_MS = 5000;
 
 function sessionFolderKey(session) {
     return session?.workspaceFolder?.uri?.toString?.() || "";
@@ -46,7 +47,11 @@ class DebugSessionBridge {
         this.intentEnabled = false;
         this.workspaceKey = "";
         this.paused = false;
-        this.capabilities = { read: null, write: null };
+        this.capabilities = { read: null, write: null, restart: null, functionBreakpoints: null };
+        this.stopReason = "";
+        this.threadId = null;
+        this.stopEpoch = 0;
+        this.stateWaiters = new Set();
         this.epoch = 0;
         this.timer = null;
         this.polling = false;
@@ -54,6 +59,10 @@ class DebugSessionBridge {
         this.consecutiveErrors = 0;
         this.snapshotPending = false;
         this.snapshotReady = false;
+        this.controlTimeoutMs = Number.isFinite(options.controlTimeoutMs)
+            ? Math.max(1, Number(options.controlTimeoutMs))
+            : CONTROL_TIMEOUT_MS;
+        this.controlInFlight = null;
     }
 
     get activeSession() {
@@ -75,6 +84,55 @@ class DebugSessionBridge {
     }
     get canWrite() {
         return !!(this.canRead && this.snapshotReady && this.capabilities.write);
+    }
+
+    agentStatus() {
+        let state = "none";
+        if (this.conflict || (this.allSessions.size && !this.hasSession)) state = "conflict";
+        else if (this.hasSession) state = this.paused ? "paused" : "running";
+        const session = this.activeSession;
+        return {
+            state,
+            paused: state === "paused",
+            reason: this.stopReason,
+            threadId: this.threadId,
+            epoch: this.stopEpoch,
+            session: session
+                ? {
+                      id: session.id,
+                      name: session.name || session.configuration?.name || "Cortex-Debug",
+                      workspace: session.workspaceFolder?.uri?.fsPath || sessionFolderKey(session)
+                  }
+                : null,
+            capabilities: { ...this.capabilities }
+        };
+    }
+
+    assertUniqueSession() {
+        if (this.conflict || (this.allSessions.size && !this.hasSession))
+            throw Object.assign(new Error("More than one Cortex-Debug session matches this workspace"), {
+                code: "DEBUG_SESSION_CONFLICT"
+            });
+        if (!this.activeSession)
+            throw Object.assign(new Error("No Cortex-Debug session is active for this workspace"), {
+                code: "DEBUG_SESSION_NOT_ACTIVE"
+            });
+        return this.activeSession;
+    }
+
+    assertPausedAccess(options = {}) {
+        this.assertUniqueSession();
+        if (!this.paused)
+            throw Object.assign(new Error("The Cortex-Debug target must be paused"), { code: "TARGET_NOT_PAUSED" });
+        if (this.capabilities.read !== true)
+            throw Object.assign(new Error("Cortex-Debug does not support DAP readMemory"), {
+                code: "DEBUG_MEMORY_READ_UNSUPPORTED"
+            });
+        if (options.write && this.capabilities.write !== true)
+            throw Object.assign(new Error("Cortex-Debug does not support DAP writeMemory"), {
+                code: "DEBUG_MEMORY_WRITE_UNSUPPORTED"
+            });
+        return this.activeSession;
     }
 
     status(extra = {}) {
@@ -144,12 +202,16 @@ class DebugSessionBridge {
         const current = [...this.sessions.keys()].sort().join("|");
         if (previous !== current) {
             this.paused = false;
-            this.capabilities = { read: null, write: null };
+            this.capabilities = { read: null, write: null, restart: null, functionBreakpoints: null };
+            this.stopReason = "";
+            this.threadId = null;
+            this.stopEpoch += 1;
             this.snapshotPending = false;
             this.snapshotReady = false;
             this._invalidate();
         }
         this.onStatus(this.status());
+        this._notifyState();
     }
 
     setIntent(enabled) {
@@ -181,34 +243,88 @@ class DebugSessionBridge {
             const body = unwrapResponse(message);
             this.capabilities.read = body.supportsReadMemoryRequest === true;
             this.capabilities.write = body.supportsWriteMemoryRequest === true;
+            this.capabilities.restart = body.supportsRestartRequest === true;
+            this.capabilities.functionBreakpoints = body.supportsFunctionBreakpoints === true;
             if (this.intentEnabled && this.paused && this.capabilities.read && !this.snapshotReady)
                 this.snapshotPending = true;
             this.onStatus(this.status());
+            this._notifyState();
             this._schedule(SNAPSHOT_INITIAL_DELAY_MS);
             return;
         }
         if (message.type !== "event") return;
         if (message.event === "stopped") {
             this.paused = true;
+            this.stopReason = String(message.body?.reason || "paused");
+            this.threadId = Number.isInteger(message.body?.threadId) ? message.body.threadId : this.threadId;
+            this.stopEpoch += 1;
             this.consecutiveErrors = 0;
             this._invalidate();
             this.snapshotReady = false;
             this.snapshotPending = this.intentEnabled;
             this.onStatus(this.status());
+            this._notifyState();
             this._schedule(SNAPSHOT_INITIAL_DELAY_MS);
         } else if (message.event === "continued") {
             this.paused = false;
+            this.stopReason = "";
+            if (Number.isInteger(message.body?.threadId)) this.threadId = message.body.threadId;
+            this.stopEpoch += 1;
             this._invalidate();
             this.snapshotPending = false;
             this.snapshotReady = false;
             this.onStatus(this.status());
+            this._notifyState();
         } else if (message.event === "terminated" || message.event === "exited") {
             this.paused = false;
+            this.stopReason = message.event;
+            this.stopEpoch += 1;
             this._invalidate();
             this.snapshotPending = false;
             this.snapshotReady = false;
             this.onStatus(this.status({ mode: "restoring", key: "live.restoring" }));
+            this._notifyState();
         }
+    }
+
+    _notifyState() {
+        const current = this.agentStatus();
+        for (const waiter of [...this.stateWaiters]) {
+            if (!waiter.predicate(current)) continue;
+            this.stateWaiters.delete(waiter);
+            clearTimeout(waiter.timer);
+            waiter.signal?.removeEventListener("abort", waiter.onAbort);
+            waiter.resolve(current);
+        }
+    }
+
+    waitForState(predicate, timeoutMs = CONTROL_TIMEOUT_MS, signal) {
+        const current = this.agentStatus();
+        if (predicate(current)) return Promise.resolve(current);
+        return new Promise((resolve, reject) => {
+            const waiter = { predicate, resolve, reject, timer: null, signal, onAbort: null };
+            waiter.onAbort = () => {
+                this.stateWaiters.delete(waiter);
+                clearTimeout(waiter.timer);
+                reject(Object.assign(new Error("Debug state wait was cancelled"), { code: "DEBUG_CONTROL_CANCELLED" }));
+            };
+            waiter.timer = setTimeout(() => {
+                this.stateWaiters.delete(waiter);
+                signal?.removeEventListener("abort", waiter.onAbort);
+                reject(
+                    Object.assign(new Error("Timed out waiting for Cortex-Debug state change"), {
+                        code: "DEBUG_CONTROL_TIMEOUT",
+                        details: { status: this.agentStatus() }
+                    })
+                );
+            }, timeoutMs);
+            if (signal?.aborted) {
+                waiter.onAbort();
+                return;
+            }
+            signal?.addEventListener("abort", waiter.onAbort, { once: true });
+            this.stateWaiters.add(waiter);
+        });
     }
 
     _invalidate() {
@@ -269,6 +385,14 @@ class DebugSessionBridge {
     }
 
     async _readBlock(session, address, count) {
+        if (
+            !Number.isSafeInteger(address) ||
+            address < 0 ||
+            !Number.isInteger(count) ||
+            count < 1 ||
+            count > MAX_READ_BYTES
+        )
+            throw Object.assign(new Error("Invalid DAP memory read range"), { code: "INVALID_MEMORY_RANGE" });
         const result = unwrapResponse(
             await session.customRequest("readMemory", {
                 memoryReference: `0x${address.toString(16)}`,
@@ -280,6 +404,141 @@ class DebugSessionBridge {
         const data = Uint8Array.from(Buffer.from(result.data, "base64"));
         if (!data.length) throw new Error(`DAP readMemory returned an empty block for 0x${address.toString(16)}`);
         return data;
+    }
+
+    async readPausedMemory(address, count) {
+        const session = this.assertPausedAccess();
+        return this._readBlock(session, Number(address), Number(count));
+    }
+
+    async writePausedMemory(address, bytes) {
+        const session = this.assertPausedAccess({ write: true });
+        const data = Uint8Array.from(bytes || []);
+        if (
+            !Number.isSafeInteger(Number(address)) ||
+            Number(address) < 0 ||
+            !data.length ||
+            data.length > MAX_READ_BYTES
+        )
+            throw Object.assign(new Error("Invalid DAP memory write range"), { code: "INVALID_MEMORY_RANGE" });
+        const result = unwrapResponse(
+            await session.customRequest("writeMemory", {
+                memoryReference: `0x${Number(address).toString(16)}`,
+                offset: 0,
+                data: Buffer.from(data).toString("base64"),
+                allowPartial: false
+            })
+        );
+        if (Number.isFinite(result.bytesWritten) && result.bytesWritten !== data.length)
+            throw Object.assign(new Error("DAP performed a partial peripheral register write"), {
+                code: "PERIPHERAL_WRITE_PARTIAL",
+                details: { requested: data.length, written: result.bytesWritten }
+            });
+        return { bytesWritten: Number.isFinite(result.bytesWritten) ? result.bytesWritten : data.length };
+    }
+
+    async _selectThread(requestedThreadId) {
+        if (Number.isInteger(requestedThreadId)) return requestedThreadId;
+        if (Number.isInteger(this.threadId)) return this.threadId;
+        const session = this.assertUniqueSession();
+        const result = unwrapResponse(await session.customRequest("threads", {}));
+        const threads = arrayThreads(result.threads).filter((thread) => Number.isInteger(thread?.id));
+        if (!threads.length)
+            throw Object.assign(new Error("Cortex-Debug returned no thread for execution control"), {
+                code: "DEBUG_THREAD_NOT_FOUND"
+            });
+        threads.sort((left, right) => left.id - right.id);
+        return threads[0].id;
+    }
+
+    async control(action, requestedThreadId) {
+        if (this.controlInFlight)
+            throw Object.assign(new Error("Another debug control action is still in progress"), {
+                code: "DEBUG_CONTROL_BUSY",
+                details: { action, activeAction: this.controlInFlight.action }
+            });
+        const operationToken = { action };
+        this.controlInFlight = operationToken;
+        try {
+            return await this._control(action, requestedThreadId);
+        } finally {
+            if (this.controlInFlight === operationToken) this.controlInFlight = null;
+        }
+    }
+
+    async _control(action, requestedThreadId) {
+        const session = this.assertUniqueSession();
+        const before = this.agentStatus();
+        const threadId = await this._selectThread(requestedThreadId);
+        const mapping = {
+            pause: { command: "pause", paused: false, args: { threadId }, expect: "paused" },
+            continue: { command: "continue", paused: true, args: { threadId, singleThread: false }, expect: "running" },
+            stepOver: { command: "next", paused: true, args: { threadId, singleThread: false }, expect: "paused" },
+            stepIn: { command: "stepIn", paused: true, args: { threadId, singleThread: false }, expect: "paused" },
+            stepOut: { command: "stepOut", paused: true, args: { threadId, singleThread: false }, expect: "paused" },
+            restart: { command: "restart", paused: null, args: {}, expect: null }
+        };
+        const operation = mapping[action];
+        if (!operation)
+            throw Object.assign(new Error(`Unsupported debug control action: ${action}`), {
+                code: "DEBUG_ACTION_UNSUPPORTED"
+            });
+        if (action === "restart" && this.capabilities.restart !== true)
+            throw Object.assign(new Error("Cortex-Debug does not advertise restart support"), {
+                code: "DEBUG_ACTION_UNSUPPORTED",
+                details: { action }
+            });
+        if (operation.paused === true && !this.paused)
+            throw Object.assign(new Error(`${action} requires a paused target`), { code: "TARGET_NOT_PAUSED" });
+        if (operation.paused === false && this.paused)
+            throw Object.assign(new Error(`${action} requires a running target`), { code: "DEBUG_STATE_INVALID" });
+        const startEpoch = this.stopEpoch;
+        const stateAbort = new AbortController();
+        const stateOutcome = this.waitForState(
+            (next) => {
+                if (next.state === "none" || next.state === "conflict" || next.session?.id !== session.id) return true;
+                if (next.epoch <= startEpoch) return false;
+                if (operation.expect) return next.state === operation.expect;
+                return next.state === "running" || next.state === "paused";
+            },
+            this.controlTimeoutMs,
+            stateAbort.signal
+        ).then(
+            (status) => ({ kind: "state", status, error: null }),
+            (error) => ({ kind: "stateError", status: null, error })
+        );
+        // Some Cortex-Debug backends emit the conclusive state event but never settle
+        // customRequest(). Observe both concurrently so a confirmed transition is not
+        // misreported as BRIDGE_TIMEOUT. The mapped promise also absorbs a late reject.
+        const requestOutcome = Promise.resolve()
+            .then(() => session.customRequest(operation.command, operation.args))
+            .then(
+                () => ({ kind: "response", status: null, error: null }),
+                (error) => ({ kind: "requestError", status: null, error })
+            );
+        const first = await Promise.race([stateOutcome, requestOutcome]);
+        if (first.kind === "requestError") {
+            stateAbort.abort();
+            throw first.error || new Error("Cortex-Debug rejected the control request");
+        }
+        const final = first.kind === "response" ? await stateOutcome : first;
+        if (final.kind === "stateError") {
+            const stateError = final.error || new Error("Cortex-Debug state wait failed");
+            stateError.details = { ...(stateError.details || {}), action, threadId, before };
+            throw stateError;
+        }
+        const status = final.status;
+        if (status.state === "conflict")
+            throw Object.assign(new Error("Multiple Cortex-Debug sessions match this workspace"), {
+                code: "DEBUG_SESSION_CONFLICT",
+                details: { action, threadId, before, status }
+            });
+        if (status.state === "none" || status.session?.id !== session.id)
+            throw Object.assign(new Error("Cortex-Debug session ended during execution control"), {
+                code: "DEBUG_SESSION_NOT_ACTIVE",
+                details: { action, threadId, before, status }
+            });
+        return { action, threadId, before, status };
     }
 
     async read(items, session = this.activeSession) {
@@ -295,6 +554,18 @@ class DebugSessionBridge {
                 samples.push({ name: item.name, bytes });
             }
         }
+        return samples;
+    }
+
+    async readPausedItems(items) {
+        const session = this.assertPausedAccess();
+        const stopEpoch = this.stopEpoch;
+        const samples = await this.read(items, session);
+        if (session !== this.activeSession || !this.paused || this.stopEpoch !== stopEpoch)
+            throw Object.assign(new Error("Target state changed during paused DAP memory read"), {
+                code: "TARGET_NOT_PAUSED",
+                details: { status: this.agentStatus() }
+            });
         return samples;
     }
 
@@ -354,9 +625,22 @@ class DebugSessionBridge {
 
     dispose() {
         this._invalidate();
+        for (const waiter of this.stateWaiters) {
+            clearTimeout(waiter.timer);
+            waiter.signal?.removeEventListener("abort", waiter.onAbort);
+            waiter.reject(
+                Object.assign(new Error("Debug session bridge was disposed"), { code: "DEBUG_SESSION_NOT_ACTIVE" })
+            );
+        }
+        this.stateWaiters.clear();
+        this.controlInFlight = null;
         this.allSessions.clear();
         this.sessions.clear();
     }
+}
+
+function arrayThreads(value) {
+    return Array.isArray(value) ? value : [];
 }
 
 module.exports = {
@@ -364,6 +648,7 @@ module.exports = {
     MIN_DAP_INTERVAL_MS,
     SNAPSHOT_INITIAL_DELAY_MS,
     SNAPSHOT_RETRY_DELAYS_MS,
+    CONTROL_TIMEOUT_MS,
     mergeReadPlan,
     unwrapResponse
 };

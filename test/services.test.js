@@ -15,7 +15,8 @@ const {
     LiveWatchService,
     buildActiveReadPlan,
     nextLivePanelId,
-    selectFocusedPanel
+    selectFocusedPanel,
+    selectPausedDebugReadSession
 } = require("../src/services/liveWatchService");
 const { AgentOrchestrator } = require("../src/services/agentOrchestrator");
 
@@ -336,6 +337,26 @@ const { AgentOrchestrator } = require("../src/services/agentOrchestrator");
         );
         assert.strictEqual(perPanel.scalarSamples[0].value, "u64:9");
         assert.strictEqual(perPanelLatest.get("counter").t, 456);
+        const pausedReadCalls = [];
+        const pausedDebugBridge = {
+            agentStatus: () => ({ state: "paused" }),
+            readPausedItems: async (items) => {
+                pausedReadCalls.push(items);
+                return [{ name: items[0].name, bytes: Uint8Array.from([9]) }];
+            }
+        };
+        const pausedDebugSession = selectPausedDebugReadSession(pausedDebugBridge);
+        assert.deepStrictEqual(
+            [...(await pausedDebugSession.readOnce([{ name: "counter", address: 0x20000000, size: 1 }]))[0].bytes],
+            [9]
+        );
+        assert.strictEqual(pausedReadCalls.length, 1);
+        pausedDebugBridge.agentStatus = () => ({ state: "running" });
+        assert.strictEqual(
+            selectPausedDebugReadSession(pausedDebugBridge),
+            null,
+            "running debug targets must never be paused implicitly for Agent reads"
+        );
         assert.strictEqual(
             nextLivePanelId(
                 new Map([

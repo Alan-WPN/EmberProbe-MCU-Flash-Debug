@@ -98,6 +98,7 @@ assert.ok(sidebar.includes('latestWriteSeq') && sidebar.includes('m.seq!==latest
 assert.ok(sidebar.includes('Math.floor(Math.log10(v))-1'), "integer steppers should scale with the current decimal digit count");
 assert.ok(sidebar.includes('::-webkit-slider-thumb'), "slider should use custom dark-gray styling instead of the native white control");
 assert.ok(sidebar.includes('>实时读写</summary>'), "live section should be renamed to read/write");
+assert.ok(sidebar.includes('>\u70e7\u5f55</button>'), "Chinese sidebar should label the primary action as flash");
 assert.ok(sidebar.includes('white-space:nowrap;cursor:pointer}.mini.primary'), "mini buttons should never wrap to two lines");
 
 // 双语支持与语言切换（中文 / English）
@@ -109,7 +110,7 @@ const sidebarEn = modernView.getModernWebviewContent({ elf: "app.elf", debugger:
 validateScripts("modernView-en", sidebarEn);
 assert.ok(sidebarEn.includes('lang="en"'), "English sidebar should set the html lang attribute");
 assert.ok(sidebarEn.includes('>Chip Info</summary>'), "English sidebar should translate section headers");
-assert.ok(sidebarEn.includes('>Download</button>'), "English sidebar should translate primary actions");
+assert.ok(sidebarEn.includes('>Flash</button>'), "English sidebar should label the primary action as flash");
 assert.ok(sidebarEn.includes('>Write List</span>'), "English sidebar should translate the write list section");
 assert.ok(sidebarEn.includes('>Live Read/Write</summary>'), "English sidebar should translate the renamed live section");
 
@@ -195,7 +196,10 @@ assert.ok(providerSource.includes("'watch.add':"), "Agent Bridge should add vari
 assert.ok(providerSource.includes("'variables.exportCsv':") && providerSource.includes("case 'agentExportCsvResult'"), "Agent Bridge should export the selected chart's real history buffer");
 assert.ok(providerSource.includes("'variables.read':"), "Agent Bridge should support one-shot variable reads");
 assert.ok(providerSource.includes("'variables.sample':"), "Agent Bridge should support autonomous trend sampling");
+assert.ok(providerSource.includes("'peripherals.list':") && providerSource.includes("'peripherals.write':"), "Agent Bridge should expose SVD peripheral inspection and confirmed writes");
+assert.ok(providerSource.includes("'debug.control':") && providerSource.includes("'debug.breakpoints.update':"), "Agent Bridge should expose Cortex-Debug execution and breakpoint control");
 assert.ok(providerSource.includes("source = 'temporary-probe'"), "one-shot reads should start a temporary probe when sampling is off");
+assert.ok(providerSource.includes("source = 'debug-session'"), "paused Cortex-Debug reads should reuse DAP instead of opening a competing probe");
 assert.ok(providerSource.includes("this._postAgentSampling(true, 'live.agentStarting'"), "temporary Agent sampling should be visible and cancellable while the probe starts");
 assert.ok(providerSource.includes("if (this._agentReadRunning) this.stopAgentReadIfRunning()"), "sidebar and chart stop actions should cancel Agent-owned sampling");
 assert.ok(providerSource.includes("this._agentReadDelayResolve"), "Agent sampling interval should be cancellable without waiting for the full delay");

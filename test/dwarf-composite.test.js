@@ -2,6 +2,7 @@
 // 验证 DWARF 复合类型布局解析：结构体成员名/偏移/类型、数组维度与元素类型。
 // 程序化构造最小 ELF32 + DWARF v4 调试段（.debug_info/.debug_abbrev），无需外部工具链。
 const assert = require("assert");
+const zlib = require("zlib");
 const { parseCompositeLayout, parseDwarfVariableTypes } = require("../src/dwarf");
 
 function str(s) { const b = []; for (const c of Buffer.from(s, "latin1")) b.push(c); b.push(0); return b; }
@@ -21,16 +22,17 @@ di.push(4, ...str("x"), ...u32(12), 0); // @37   member x -> int@12, offset 0
 di.push(4, ...str("y"), ...u32(19), 4); // @45   member y -> float@19, offset 4
 di.push(0);                             // @53   end Sensor children
 di.push(8, ...str("SensorAlias"), ...u32(28)); // @54 typedef SensorAlias -> Sensor@28
-di.push(6, ...u32(12), 16);             // @71 array_type of int@12 (byte_size 16)
-di.push(7, 3);                          // @77   subrange upper_bound = 3 -> 4 elements
-di.push(0);                             // @79   end array children
-di.push(6, ...u32(28), 16);             // @80 array_type of Sensor@28 (byte_size 16)
-di.push(7, 1);                          // @86   subrange upper_bound = 1 -> 2 elements
-di.push(0);                             // @88   end array children
-di.push(5, ...str("sensorAlias"), ...u32(54), 5, 0x03, ...u32(0x20000100)); // @89 typedef variable
-di.push(5, ...str("sensorArr"), ...u32(80), 5, 0x03, ...u32(0x20000200));   // @112 Sensor[2]
-di.push(5, ...str("buf"), ...u32(71), 5, 0x03, ...u32(0x20000300));         // @133 int[4]
-di.push(0);                             // @148 end CU children
+di.push(9, ...u32(54));                 // @71 volatile_type -> SensorAlias@54
+di.push(6, ...u32(12), 16);             // @76 array_type of int@12 (byte_size 16)
+di.push(7, 3);                          // @82   subrange upper_bound = 3 -> 4 elements
+di.push(0);                             // @84   end array children
+di.push(6, ...u32(28), 16);             // @85 array_type of Sensor@28 (byte_size 16)
+di.push(7, 1);                          // @91   subrange upper_bound = 1 -> 2 elements
+di.push(0);                             // @93   end array children
+di.push(5, ...str("sensorAlias"), ...u32(71), 5, 0x03, ...u32(0x20000100)); // @94 volatile typedef variable
+di.push(5, ...str("sensorArr"), ...u32(85), 5, 0x03, ...u32(0x20000200));   // @117 Sensor[2]
+di.push(5, ...str("buf"), ...u32(76), 5, 0x03, ...u32(0x20000300));         // @138 int[4]
+di.push(0);                             // @153 end CU children
 const unitLen = di.length - 4;
 di[0] = unitLen & 0xff; di[1] = (unitLen >>> 8) & 0xff; di[2] = (unitLen >>> 16) & 0xff; di[3] = (unitLen >>> 24) & 0xff;
 const debugInfo = Buffer.from(di);
@@ -45,6 +47,7 @@ const abbrev = Buffer.from([
     6, 0x01, 1, 0x49, 0x13, 0x0b, 0x0b, 0, 0,               // array_type: type(ref4) byte_size(data1)
     7, 0x21, 0, 0x2f, 0x0b, 0, 0,                           // subrange_type: upper_bound(0x2f, data1)
     8, 0x16, 0, 0x03, 0x08, 0x49, 0x13, 0, 0,               // typedef: name(str) type(ref4)
+    9, 0x35, 0, 0x49, 0x13, 0, 0,                           // volatile_type: type(ref4)
     0
 ]);
 
@@ -72,6 +75,44 @@ const sh = i => shoff + i * 40;
 buf.writeUInt32LE(nameOff[".debug_info"], sh(1) + 0); buf.writeUInt32LE(1, sh(1) + 4); buf.writeUInt32LE(diOff, sh(1) + 16); buf.writeUInt32LE(debugInfo.length, sh(1) + 20);
 buf.writeUInt32LE(nameOff[".debug_abbrev"], sh(2) + 0); buf.writeUInt32LE(1, sh(2) + 4); buf.writeUInt32LE(abOff, sh(2) + 16); buf.writeUInt32LE(abbrev.length, sh(2) + 20);
 buf.writeUInt32LE(nameOff[".shstrtab"], sh(3) + 0); buf.writeUInt32LE(3, sh(3) + 4); buf.writeUInt32LE(shstrOff, sh(3) + 16); buf.writeUInt32LE(shstrtab.length, sh(3) + 20);
+
+function compressedElf32Section(data) {
+    const payload = zlib.deflateSync(data);
+    const section = Buffer.alloc(12 + payload.length);
+    section.writeUInt32LE(1, 0); // ELFCOMPRESS_ZLIB
+    section.writeUInt32LE(data.length, 4);
+    section.writeUInt32LE(1, 8);
+    payload.copy(section, 12);
+    return section;
+}
+
+const compressedInfo = compressedElf32Section(debugInfo);
+const compressedAbbrev = compressedElf32Section(abbrev);
+const compressedInfoOff = 52;
+const compressedAbbrevOff = compressedInfoOff + compressedInfo.length;
+const compressedNamesOff = compressedAbbrevOff + compressedAbbrev.length;
+const compressedShoff = (compressedNamesOff + shstrtab.length + 3) & ~3;
+const compressedBuf = Buffer.alloc(compressedShoff + shnum * 40);
+buf.subarray(0, 52).copy(compressedBuf, 0);
+compressedBuf.writeUInt32LE(compressedShoff, 32);
+compressedInfo.copy(compressedBuf, compressedInfoOff);
+compressedAbbrev.copy(compressedBuf, compressedAbbrevOff);
+shstrtab.copy(compressedBuf, compressedNamesOff);
+const compressedSh = i => compressedShoff + i * 40;
+compressedBuf.writeUInt32LE(nameOff[".debug_info"], compressedSh(1));
+compressedBuf.writeUInt32LE(1, compressedSh(1) + 4);
+compressedBuf.writeUInt32LE(0x800, compressedSh(1) + 8); // SHF_COMPRESSED
+compressedBuf.writeUInt32LE(compressedInfoOff, compressedSh(1) + 16);
+compressedBuf.writeUInt32LE(compressedInfo.length, compressedSh(1) + 20);
+compressedBuf.writeUInt32LE(nameOff[".debug_abbrev"], compressedSh(2));
+compressedBuf.writeUInt32LE(1, compressedSh(2) + 4);
+compressedBuf.writeUInt32LE(0x800, compressedSh(2) + 8);
+compressedBuf.writeUInt32LE(compressedAbbrevOff, compressedSh(2) + 16);
+compressedBuf.writeUInt32LE(compressedAbbrev.length, compressedSh(2) + 20);
+compressedBuf.writeUInt32LE(nameOff[".shstrtab"], compressedSh(3));
+compressedBuf.writeUInt32LE(3, compressedSh(3) + 4);
+compressedBuf.writeUInt32LE(compressedNamesOff, compressedSh(3) + 16);
+compressedBuf.writeUInt32LE(shstrtab.length, compressedSh(3) + 20);
 
 // —— 断言：结构体布局 ——
 const layouts = parseCompositeLayout(buf);
@@ -110,6 +151,13 @@ const types = parseDwarfVariableTypes(buf);
 assert.strictEqual(types.get("sensorAlias").typeName, "SensorAlias");
 assert.strictEqual(types.get("sensorAlias").watchType, "", "结构体整体不可作为标量观察");
 assert.strictEqual(types.get("buf").typeName, "int[]");
+
+// SHF_COMPRESSED 的真实 Debug ELF 仍应解压 DWARF，并穿透 volatile -> typedef -> struct。
+const compressedLayouts = parseCompositeLayout(compressedBuf);
+const compressedVolatile = compressedLayouts.get("sensorAlias");
+assert.ok(compressedVolatile, "压缩 DWARF 中的 volatile 复合变量应保留布局");
+assert.strictEqual(compressedVolatile.typeName, "SensorAlias");
+assert.deepStrictEqual(compressedVolatile.members.map(m => m.name), ["x", "y"]);
 
 // —— 回归守护：CU 中出现 GNU 扩展 form（split-dwarf 场景的 GNU_addr_index 0x1f01）
 // 时解析不能中止整个 CU，否则该 CU 后续所有变量都会丢失复合布局 ——

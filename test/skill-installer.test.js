@@ -48,7 +48,7 @@ const { inspectSkill, installSkill, uninstallSkill, inspectSkills } = require(".
     try {
         const installed = await installSkill(vscode, context, "en");
         assert.strictEqual(installed.state, "installed");
-        assert.strictEqual(installed.installed, 8);
+        assert.strictEqual(installed.installed, 10);
         assert.strictEqual(installed.scopes.workspace.state, "installed");
         assert.strictEqual(installed.scopes.global.state, "notInstalled");
         fs.unlinkSync(path.join(workspace, ".agents", "skills", "mcu-chip-info", "scripts", "read-chip.js"));

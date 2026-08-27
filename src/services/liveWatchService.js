@@ -42,6 +42,15 @@ function selectFocusedPanel(entries) {
     return focused;
 }
 
+function selectPausedDebugReadSession(debugBridge) {
+    if (debugBridge?.agentStatus?.().state !== "paused") return null;
+    return {
+        readOnce(items) {
+            return debugBridge.readPausedItems(items);
+        }
+    };
+}
+
 // 单消费者解码层：同一份原始字节可按每个面板自己的类型/复合布局分别解码。
 class LiveWatchService {
     constructor(elfSymbols) {
@@ -102,4 +111,10 @@ class LiveWatchService {
     }
 }
 
-module.exports = { LiveWatchService, buildActiveReadPlan, nextLivePanelId, selectFocusedPanel };
+module.exports = {
+    LiveWatchService,
+    buildActiveReadPlan,
+    nextLivePanelId,
+    selectFocusedPanel,
+    selectPausedDebugReadSession
+};

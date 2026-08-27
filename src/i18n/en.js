@@ -93,7 +93,7 @@ module.exports = Object.freeze({
     "sb.noMatch": "No matching variables",
     "sb.noImportable": "This ELF has no importable variables",
     "sb.resizeHint": "Drag up/down to resize the variable list",
-    "sb.download": "Download",
+    "sb.download": "Flash",
     "sb.footConnecting": "Connecting to the extension service…",
     "sb.extNotConnected": "Extension service not connected",
     "sb.executing": "Running…",

@@ -93,7 +93,7 @@ module.exports = Object.freeze({
     "sb.noMatch": "没有匹配变量",
     "sb.noImportable": "当前 ELF 没有可导入变量",
     "sb.resizeHint": "上下拖动调整变量列表高度",
-    "sb.download": "下载",
+    "sb.download": "烧录",
     "sb.footConnecting": "正在连接扩展服务…",
     "sb.extNotConnected": "扩展服务未连接",
     "sb.executing": "正在执行…",

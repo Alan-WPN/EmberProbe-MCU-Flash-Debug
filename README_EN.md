@@ -12,7 +12,7 @@ EmberProbe is a VS Code extension for Cortex-M development. Built on OpenOCD, it
 - Live variable watch: non-intrusively reads Cortex-M RAM while the target runs; the sidebar offers a standalone value list, and multiple chart panels can keep independent watch lists and history buffers.
 - Live variable write: changes memory in real time while the target runs, offering slider, input box, and mouse wheel for value changes, with automatic read-back after each change.
 - Cortex-Debug integration: starts breakpoint debugging.
-- Optionally installs eight Agent Skills covering firmware download and verification, live variable reads and writes, chip and fault inspection, ELF analysis, and configuration synchronization.
+- Optionally installs ten Agent Skills covering firmware download and verification, live variable reads and writes, SVD peripheral debugging, Cortex-Debug session/breakpoint control, chip and fault inspection, ELF analysis, and configuration synchronization.
 
 ## Requirements
 
@@ -36,13 +36,15 @@ During debugging, Start preserves sampling intent without sending a pause reques
 ## Agent Skills
 
 - `mcu-download`: detects and downloads the newest ELF, reporting an ELF SHA-256 fingerprint during preflight and execution.
-- `mcu-live-watch`: reads once, analyzes trends, or reads/exports actual chart history CSV by panel, series, and time range. Temporary trend sampling is synchronized to the sidebar and charts. Chart additions target the most recently focused panel, or the persisted chart #1 list when no panel is open.
+- `mcu-live-watch`: reads once, analyzes trends, or reads/exports actual chart history CSV by panel, series, and time range. A paused Cortex-Debug session is reused through DAP without competing for the probe; a running target is never paused implicitly. Temporary trend sampling is synchronized to the sidebar and charts.
 - `mcu-chip-info`: reads chip info by the `identity`, `debug`, and `runtime` groups, or by specific fields.
 - `mcu-config`: reads or changes ELF, debugger, MCU, SVD, OpenOCD, and sampling parameters.
 - `mcu-var-write`: safely writes scalars or composite leaves by name with two-stage confirmation, ELF fingerprint binding, and read-back verification.
 - `mcu-fault-analyzer`: reads and decodes Cortex-M fault registers and symbolizes PC/LR with the current ELF.
 - `mcu-elf-analyze`: analyzes Flash/RAM usage, section layout, and large symbols offline without occupying the debug probe.
 - `mcu-flash-verify`: reads target Flash and compares it with the loadable contents of the current ELF.
+- `mcu-peripheral-debug`: parses the workspace SVD, reads and decodes paused peripheral registers/fields, and performs safe writes after a fresh one-time confirmation for every request.
+- `mcu-debug-control`: starts, stops, and controls Cortex-Debug sessions, including pause/continue/stepping/restart plus source-line and function breakpoints.
 
 The extension handles configuration and UI synchronization through a loopback-only Agent Bridge while continuing to manage probe mutual exclusion. Every ELF read recomputes the content fingerprint and resolves symbols; sampling aborts when the ELF changes during a session to avoid reusing stale variable addresses.
 
@@ -56,7 +58,7 @@ npm run test:e2e
 npm run package
 ```
 
-Run `npm run release:prepare -- <version> --date YYYY-MM-DD` when preparing a new version; the script synchronizes version metadata, the README, and the Changelog. Pushing the matching `vX.Y.Z` tag automatically creates a GitHub Release and uploads the VSIX; see [docs/RELEASING.md](docs/RELEASING.md) for publishing and retry instructions. See [test/hil/README.md](test/hil/README.md) for hardware-runner setup. The current extension version is `0.7.0`.
+Run `npm run release:prepare -- <version> --date YYYY-MM-DD` when preparing a new version; the script synchronizes version metadata, the README, and the Changelog. Pushing the matching `vX.Y.Z` tag automatically creates a GitHub Release and uploads the VSIX; see [docs/RELEASING.md](docs/RELEASING.md) for publishing and retry instructions. See [test/hil/README.md](test/hil/README.md) for hardware-runner setup. The current extension version is `0.7.1`.
 
 ## Project Structure
 

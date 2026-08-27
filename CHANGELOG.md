@@ -6,6 +6,22 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-27
+
+### Added
+
+- 新增 `mcu-peripheral-debug` Agent Skill：解析 CMSIS-SVD 外设/寄存器/位域与枚举，在 Cortex-Debug 暂停态下读取解码，并使用绑定 SVD、会话、停止代次和寄存器旧值的一次性确认安全写入。
+- 新增 `mcu-debug-control` Agent Skill：通过 VS Code/DAP 启动和控制 Cortex-Debug 会话，支持暂停、继续、单步、重启、停止以及源码行/函数断点管理。
+
+### Changed
+
+- `mcu-live-watch` 升级至 1.7.0：Cortex-Debug 暂停时通过 DAP 读取标量与复合变量，不再启动临时 OpenOCD 争抢探针；运行态仍拒绝隐式暂停。
+
+### Fixed
+
+- 调试控制改为并发观察 DAP 响应与状态事件，已经由 epoch/最终状态确认成功的 restart/continue/pause 不再因适配器 Promise 迟到而误报 `BRIDGE_TIMEOUT`；重叠控制请求返回 `DEBUG_CONTROL_BUSY`。
+- DWARF 解析支持 ELF `SHF_COMPRESSED` 和 GNU `.zdebug_*` 压缩调试节，`volatile -> typedef -> struct/union/array` 复合变量可正常展开。
+
 ## [0.7.0] - 2026-08-25
 
 ### Added

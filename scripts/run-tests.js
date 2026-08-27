@@ -24,6 +24,7 @@ const sourceFiles = [
     "src/liveWatchView.js",
     "src/validation.js",
     "src/writeAuthorization.js",
+    "src/peripheralWriteAuthorization.js",
     "src/probeCoordinator.js",
     "src/webviewAssets.js",
     "src/webviewTemplate.js",
@@ -43,6 +44,8 @@ const sourceFiles = [
     "src/services/svdLibraryService.js",
     "src/services/officialSvdService.js",
     "src/services/svdManager.js",
+    "src/services/svdPeripheralService.js",
+    "src/services/debugControlService.js",
     "src/services/agentOrchestrator.js",
     "src/i18n/index.js",
     "src/i18n/zh.js",
@@ -63,7 +66,9 @@ const sourceFiles = [
     "skills/mcu-live-watch/scripts/read-live.js",
     "skills/mcu-var-write/scripts/write-var.js",
     "skills/mcu-fault-analyzer/scripts/analyze-fault.js",
-    "skills/mcu-elf-analyze/scripts/analyze-elf.js"
+    "skills/mcu-elf-analyze/scripts/analyze-elf.js",
+    "skills/mcu-peripheral-debug/scripts/peripheral.js",
+    "skills/mcu-debug-control/scripts/debug.js"
 ];
 
 const allTests = [
@@ -93,6 +98,9 @@ const allTests = [
     "test/cortex-debug-integration.test.js",
     "test/svd-services.test.js",
     "test/svd-manager.test.js",
+    "test/svd-peripheral.test.js",
+    "test/debug-control.test.js",
+    "test/new-skills.test.js",
     "test/openocd-checker.test.js",
     "test/openocd-installer.test.js",
     "test/chip-info.test.js",
@@ -118,6 +126,8 @@ const qualityTests = [
     "test/cortex-debug-integration.test.js",
     "test/svd-services.test.js",
     "test/svd-manager.test.js",
+    "test/svd-peripheral.test.js",
+    "test/debug-control.test.js",
     "test/hil-runner.test.js"
 ];
 

@@ -18,6 +18,7 @@ const validation = require("./validation");
 const openocdScripts = require("./openocdScripts");
 const { AgentBridge } = require("./agentBridge");
 const { WriteAuthorization } = require("./writeAuthorization");
+const { PeripheralWriteAuthorization } = require("./peripheralWriteAuthorization");
 const { ProbeCoordinator } = require("./probeCoordinator");
 const { ConfigurationStore, assertAgentSettable } = require("./services/configurationStore");
 const { FlashService } = require("./services/flashService");
@@ -27,9 +28,17 @@ const { ElfService } = require("./services/elfService");
 const { OpenOcdStatusService } = require("./services/openocdStatusService");
 const { SkillStatusService, hasWorkspaceSkills } = require("./services/skillStatusService");
 const { ChipInfoService } = require("./services/chipInfoService");
-const { LiveWatchService, buildActiveReadPlan, nextLivePanelId, selectFocusedPanel } = require("./services/liveWatchService");
+const {
+    LiveWatchService,
+    buildActiveReadPlan,
+    nextLivePanelId,
+    selectFocusedPanel,
+    selectPausedDebugReadSession
+} = require("./services/liveWatchService");
 const { DebugSessionBridge, MIN_DAP_INTERVAL_MS } = require("./services/debugSessionBridge");
 const { SvdManager } = require("./services/svdManager");
+const { SvdPeripheralService } = require("./services/svdPeripheralService");
+const { DebugControlService } = require("./services/debugControlService");
 const { resolveCortexToolchainForWorkspace } = require("./services/cortexToolchainService");
 const { externalizeWebviewHtml } = require("./webviewAssets");
 const fs = require("fs");
@@ -159,6 +168,7 @@ class MainViewProvider {
             onError: error => this._postLive({ type: 'liveError', key: error.i18nKey, message: error.message || String(error) })
         });
         this._writeAuthorization = new WriteAuthorization(context.workspaceState);
+        this._peripheralWriteAuthorization = new PeripheralWriteAuthorization();
         this._configurationStore = new ConfigurationStore({
             vscode,
             context,
@@ -220,6 +230,17 @@ class MainViewProvider {
             getChipInfo: () => this._chipInfoService.info,
             onStatus: status => this._webviewView?.webview.postMessage({ type: 'svdStatus', ...status })
         });
+        this._svdPeripheralService = new SvdPeripheralService({
+            loadBoundSvd: () => this._svdManager.resolveForFolder(this._commandContext().folder),
+            debugBridge: this._debugBridge,
+            authorization: this._peripheralWriteAuthorization
+        });
+        this._debugControlService = new DebugControlService({
+            vscode,
+            debugBridge: this._debugBridge,
+            workspaceProvider: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+            startDebug: () => this.commandHandlers['mcu-vscode.debug']()
+        });
         this._agentService = new AgentOrchestrator({
             Bridge: AgentBridge,
             workspaceProvider: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
@@ -237,7 +258,15 @@ class MainViewProvider {
                 'variables.write.permission': params => this._agentWritePermission(params),
                 'chip.read': () => this.readChipInfoAction(true),
                 'fault.read': () => this._readAgentFault(),
-                'elf.analyze': params => this._analyzeElf(params || {})
+                'elf.analyze': params => this._analyzeElf(params || {}),
+                'peripherals.list': params => this._svdPeripheralService.list(params || {}),
+                'peripherals.read': params => this._svdPeripheralService.read(params || {}),
+                'peripherals.write': params => this._svdPeripheralService.write(params || {}),
+                'debug.status': () => this._debugControlService.status(),
+                'debug.start': () => this._debugControlService.start(),
+                'debug.control': params => this._debugControlService.control(params || {}),
+                'debug.breakpoints.list': () => this._debugControlService.listBreakpoints(),
+                'debug.breakpoints.update': params => this._debugControlService.updateBreakpoints(params || {})
             }
         });
         this.registerCommandHandlers();
@@ -788,7 +817,7 @@ class MainViewProvider {
                 if (index + 1 < count) await this._waitAgentInterval(intervalMs);
             }
             return { source, elf: elfResult.elf, samples: result };
-        }, { syncStatus, total: count });
+        }, { syncStatus, total: count, allowPausedDebugRead: true });
     }
     // 获取 Agent 探针会话：复用活动采样连接或创建临时会话，handler({session, source, temporary}) 完成实际读写，
     // finally 中临时会话必释放。互斥与状态同步语义与原 _runAgentSamples 一致。
@@ -814,10 +843,20 @@ class MainViewProvider {
         let session = this._liveWatchRunning ? this._liveSession : null;
         let temporary = false;
         let source = 'active-sampling';
+        if (!session && options.allowPausedDebugRead) {
+            session = selectPausedDebugReadSession(this._debugBridge);
+            if (session) source = 'debug-session';
+        }
         if (!session) {
             if (this._agentReadRunning) throw Object.assign(new Error('Another Agent variable read is in progress'), { code: 'AGENT_READ_BUSY' });
             if (this._downloadRunning || this._chipInfoRunning || this._debugStarting || vscode.debug.activeDebugSession) {
-                throw Object.assign(new Error('The debug probe is busy with another operation'), { code: 'PROBE_BUSY' });
+                throw Object.assign(new Error('The debug probe is busy with another operation'), {
+                    code: 'PROBE_BUSY',
+                    details: {
+                        activeOperation: this._debugStarting || vscode.debug.activeDebugSession ? 'debug' : 'probe',
+                        debugState: this._debugBridge.agentStatus().state
+                    }
+                });
             }
             this._agentReadRunning = true;
             this._agentReadCancelled = false;

@@ -54,6 +54,8 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
     bridge.handleMessage(session, { type: "response", command: "initialize", success: true, body: { supportsReadMemoryRequest: true, supportsWriteMemoryRequest: true } });
     bridge.handleMessage(session, { type: "event", event: "stopped" });
+    const directPausedRead = await bridge.readPausedItems([{ name: "direct", address: 0x20000000, size: 4 }]);
+    assert.deepStrictEqual([...directPausedRead[0].bytes], [1, 2, 3, 4]);
     assert.strictEqual(bridge.status().snapshotReady, false);
     assert.strictEqual(bridge.status().mode, "debug-paused-reading");
     await delay(SNAPSHOT_INITIAL_DELAY_MS + 40);
