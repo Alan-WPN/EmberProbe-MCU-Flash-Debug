@@ -28,6 +28,47 @@ function buildActiveReadPlan(watchLists, elfSymbols) {
     return Array.from(byName.values());
 }
 
+function filterRuntimeRamPlan(items, sections) {
+    const SHF_WRITE = 1;
+    const SHF_ALLOC = 2;
+    const ranges = (Array.isArray(sections) ? sections : [])
+        .filter(
+            (section) =>
+                (Number(section.flags) & (SHF_WRITE | SHF_ALLOC)) === (SHF_WRITE | SHF_ALLOC) &&
+                Number(section.size) > 0
+        )
+        .map((section) => ({
+            name: section.name || "",
+            start: Number(section.addr),
+            end: Number(section.addr) + Number(section.size)
+        }))
+        .filter(
+            (range) =>
+                Number.isSafeInteger(range.start) &&
+                Number.isSafeInteger(range.end) &&
+                range.start >= 0 &&
+                range.end <= 0x100000000 &&
+                range.end > range.start
+        );
+    const allowed = [];
+    const denied = [];
+    for (const item of Array.isArray(items) ? items : []) {
+        const address = Number(item?.address);
+        const size = Number(item?.size);
+        const end = address + size;
+        const valid =
+            Number.isInteger(address) &&
+            Number.isInteger(size) &&
+            address >= 0 &&
+            size > 0 &&
+            Number.isSafeInteger(end) &&
+            end <= 0x100000000 &&
+            ranges.some((range) => address >= range.start && end <= range.end);
+        (valid ? allowed : denied).push(item);
+    }
+    return { allowed, denied, ranges };
+}
+
 function nextLivePanelId(entries) {
     const used = entries instanceof Map ? entries : new Map((entries || []).map((id) => [Number(id), true]));
     let id = 1;
@@ -116,5 +157,6 @@ module.exports = {
     buildActiveReadPlan,
     nextLivePanelId,
     selectFocusedPanel,
-    selectPausedDebugReadSession
+    selectPausedDebugReadSession,
+    filterRuntimeRamPlan
 };

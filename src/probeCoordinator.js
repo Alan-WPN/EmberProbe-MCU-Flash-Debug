@@ -1,6 +1,14 @@
 "use strict";
 
-const PROBE_OPERATIONS = Object.freeze(["download", "liveWatch", "liveStart", "chipInfo", "agentRead", "debugStart"]);
+const PROBE_OPERATIONS = Object.freeze([
+    "download",
+    "liveWatch",
+    "liveStart",
+    "chipInfo",
+    "agentRead",
+    "debugStart",
+    "debugServer"
+]);
 
 class ProbeCoordinator {
     constructor() {
@@ -72,12 +80,13 @@ class ProbeCoordinator {
         const current = this._legacyLeases.get(name);
         if (active === true) {
             if (current && !current.released) return true;
-            if (name === "liveWatch") {
-                const starting = this._legacyLeases.get("liveStart");
+            if (name === "liveWatch" || name === "debugServer") {
+                const previousName = name === "liveWatch" ? "liveStart" : "debugStart";
+                const starting = this._legacyLeases.get(previousName);
                 if (starting && !starting.released) {
-                    const running = starting.transition("liveWatch");
-                    this._legacyLeases.delete("liveStart");
-                    this._legacyLeases.set("liveWatch", running);
+                    const running = starting.transition(name);
+                    this._legacyLeases.delete(previousName);
+                    this._legacyLeases.set(name, running);
                     return true;
                 }
             }

@@ -31,12 +31,11 @@ The sidebar lists all global/static variables of the current ELF; click a variab
 - Limits: supports only Cortex-M and global/static variables at fixed addresses; sampling bandwidth is limited (~10–50 Hz). Multiple panels share sampling start/stop and interval state; memory use grows linearly with panel count, with `maxSamples` applied per panel.
 - Related settings: `emberprobe.tclPort`, `emberprobe.sampleIntervalMs`, `emberprobe.maxSamples`.
 
-During debugging, Start preserves sampling intent without sending a pause request. A running target shows “waiting for pause”; once halted, DAP sampling runs no faster than 250 ms and validated writes become available. Use the SVD controls in the chip card to choose an existing file or download an official one. New bindings apply to the next debug session.
 
 ## Agent Skills
 
 - `mcu-download`: detects and downloads the newest ELF, reporting an ELF SHA-256 fingerprint during preflight and execution.
-- `mcu-live-watch`: reads once, analyzes trends, or reads/exports actual chart history CSV by panel, series, and time range. A paused Cortex-Debug session is reused through DAP without competing for the probe; a running target is never paused implicitly. Temporary trend sampling is synchronized to the sidebar and charts.
+- `mcu-live-watch`: reads once, analyzes trends, or reads/exports actual chart history CSV by panel, series, and time range. 
 - `mcu-chip-info`: reads chip info by the `identity`, `debug`, and `runtime` groups, or by specific fields.
 - `mcu-config`: reads or changes ELF, debugger, MCU, SVD, OpenOCD, and sampling parameters.
 - `mcu-var-write`: safely writes scalars or composite leaves by name with two-stage confirmation, ELF fingerprint binding, and read-back verification.
@@ -45,8 +44,6 @@ During debugging, Start preserves sampling intent without sending a pause reques
 - `mcu-flash-verify`: reads target Flash and compares it with the loadable contents of the current ELF.
 - `mcu-peripheral-debug`: parses the workspace SVD, reads and decodes paused peripheral registers/fields, and performs safe writes after a fresh one-time confirmation for every request.
 - `mcu-debug-control`: starts, stops, and controls Cortex-Debug sessions, including pause/continue/stepping/restart plus source-line and function breakpoints.
-
-The extension handles configuration and UI synchronization through a loopback-only Agent Bridge while continuing to manage probe mutual exclusion. Every ELF read recomputes the content fingerprint and resolves symbols; sampling aborts when the ELF changes during a session to avoid reusing stale variable addresses.
 
 ## Development & Build
 

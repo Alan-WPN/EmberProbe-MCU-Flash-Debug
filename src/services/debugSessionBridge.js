@@ -42,6 +42,8 @@ class DebugSessionBridge {
         this.onSamples = options.onSamples || (() => {});
         this.onStatus = options.onStatus || (() => {});
         this.onError = options.onError || (() => {});
+        this.onTargetState = options.onTargetState || (() => {});
+        this.beforePausedRead = options.beforePausedRead || (async () => {});
         this.allSessions = new Map();
         this.sessions = new Map();
         this.intentEnabled = false;
@@ -63,6 +65,9 @@ class DebugSessionBridge {
             ? Math.max(1, Number(options.controlTimeoutMs))
             : CONTROL_TIMEOUT_MS;
         this.controlInFlight = null;
+        this.transitionKind = "";
+        this.transitionCommand = "";
+        this.transitionRequestSeq = null;
     }
 
     get activeSession() {
@@ -80,7 +85,14 @@ class DebugSessionBridge {
         return this.sessions.size > 1;
     }
     get canRead() {
-        return !!(this.intentEnabled && this.paused && !this.conflict && this.activeSession && this.capabilities.read);
+        return !!(
+            this.intentEnabled &&
+            this.paused &&
+            !this.transitionKind &&
+            !this.conflict &&
+            this.activeSession &&
+            this.capabilities.read
+        );
     }
     get canWrite() {
         return !!(this.canRead && this.snapshotReady && this.capabilities.write);
@@ -124,6 +136,11 @@ class DebugSessionBridge {
         this.assertUniqueSession();
         if (!this.paused)
             throw Object.assign(new Error("The Cortex-Debug target must be paused"), { code: "TARGET_NOT_PAUSED" });
+        if (this.transitionKind)
+            throw Object.assign(new Error("Cortex-Debug execution control is in progress"), {
+                code: "DEBUG_STATE_TRANSITION",
+                details: { transition: this.transitionKind }
+            });
         if (this.capabilities.read !== true)
             throw Object.assign(new Error("Cortex-Debug does not support DAP readMemory"), {
                 code: "DEBUG_MEMORY_READ_UNSUPPORTED"
@@ -208,6 +225,9 @@ class DebugSessionBridge {
             this.stopEpoch += 1;
             this.snapshotPending = false;
             this.snapshotReady = false;
+            this.transitionKind = "";
+            this.transitionCommand = "";
+            this.transitionRequestSeq = null;
             this._invalidate();
         }
         this.onStatus(this.status());
@@ -237,8 +257,63 @@ class DebugSessionBridge {
         this._schedule(SNAPSHOT_INITIAL_DELAY_MS);
     }
 
+    handleRequest(session, message) {
+        if (!session || !this.sessions.has(session.id) || message?.type !== "request") return;
+        const transitions = {
+            next: "step",
+            stepIn: "step",
+            stepOut: "step",
+            restart: "reset",
+            pause: "pause",
+            continue: "continue",
+            disconnect: "terminate",
+            terminate: "terminate"
+        };
+        const transition = transitions[message.command];
+        if (!transition) return;
+        this.transitionKind = transition;
+        this.transitionCommand = message.command;
+        this.transitionRequestSeq = Number.isInteger(message.seq) ? message.seq : null;
+        this._invalidate();
+        this.snapshotPending = false;
+        this.snapshotReady = false;
+        this.onTargetState({
+            state: "transition",
+            transition,
+            command: message.command,
+            epoch: this.stopEpoch,
+            session
+        });
+        this.onStatus(this.status());
+    }
+
     handleMessage(session, message) {
         if (!session || !this.sessions.has(session.id) || !message) return;
+        const failedTransition =
+            message.type === "response" &&
+            message.success === false &&
+            this.transitionKind &&
+            (message.command === this.transitionCommand ||
+                (this.transitionRequestSeq !== null && message.request_seq === this.transitionRequestSeq));
+        if (failedTransition) {
+            const transition = this.transitionKind;
+            this.transitionKind = "";
+            this.transitionCommand = "";
+            this.transitionRequestSeq = null;
+            this._invalidate();
+            this.snapshotPending = this.intentEnabled && this.paused;
+            this.snapshotReady = false;
+            this.onTargetState({
+                state: "transition-failed",
+                transition,
+                command: message.command,
+                epoch: this.stopEpoch,
+                session
+            });
+            this.onStatus(this.status());
+            this._schedule(SNAPSHOT_INITIAL_DELAY_MS);
+            return;
+        }
         if (message.type === "response" && message.command === "initialize" && message.success !== false) {
             const body = unwrapResponse(message);
             this.capabilities.read = body.supportsReadMemoryRequest === true;
@@ -254,6 +329,10 @@ class DebugSessionBridge {
         }
         if (message.type !== "event") return;
         if (message.event === "stopped") {
+            const transition = this.transitionKind;
+            this.transitionKind = "";
+            this.transitionCommand = "";
+            this.transitionRequestSeq = null;
             this.paused = true;
             this.stopReason = String(message.body?.reason || "paused");
             this.threadId = Number.isInteger(message.body?.threadId) ? message.body.threadId : this.threadId;
@@ -262,10 +341,23 @@ class DebugSessionBridge {
             this._invalidate();
             this.snapshotReady = false;
             this.snapshotPending = this.intentEnabled;
+            this.onTargetState({
+                state: "stopped",
+                transition,
+                epoch: this.stopEpoch,
+                reason: this.stopReason,
+                session
+            });
             this.onStatus(this.status());
             this._notifyState();
             this._schedule(SNAPSHOT_INITIAL_DELAY_MS);
         } else if (message.event === "continued") {
+            const transition = this.transitionKind;
+            if (transition === "continue") {
+                this.transitionKind = "";
+                this.transitionCommand = "";
+                this.transitionRequestSeq = null;
+            }
             this.paused = false;
             this.stopReason = "";
             if (Number.isInteger(message.body?.threadId)) this.threadId = message.body.threadId;
@@ -273,15 +365,21 @@ class DebugSessionBridge {
             this._invalidate();
             this.snapshotPending = false;
             this.snapshotReady = false;
+            this.onTargetState({ state: "continued", transition, epoch: this.stopEpoch, session });
             this.onStatus(this.status());
             this._notifyState();
         } else if (message.event === "terminated" || message.event === "exited") {
+            const transition = this.transitionKind;
+            this.transitionKind = "";
+            this.transitionCommand = "";
+            this.transitionRequestSeq = null;
             this.paused = false;
             this.stopReason = message.event;
             this.stopEpoch += 1;
             this._invalidate();
             this.snapshotPending = false;
             this.snapshotReady = false;
+            this.onTargetState({ state: message.event, transition, epoch: this.stopEpoch, session });
             this.onStatus(this.status({ mode: "restoring", key: "live.restoring" }));
             this._notifyState();
         }
@@ -347,16 +445,19 @@ class DebugSessionBridge {
 
     async _poll() {
         if (!this.canRead || !this.snapshotPending || this.snapshotReady || this.polling) return;
-        const plan = this.getReadPlan() || [];
-        if (!plan.length) {
-            this.onStatus(this.status({ key: "live.needVar" }));
-            return;
-        }
         const session = this.activeSession;
         const epoch = this.epoch;
         this.polling = true;
         try {
-            const samples = await this.read(plan, session);
+            await this.beforePausedRead();
+            if (epoch !== this.epoch || !this.canRead || !this.snapshotPending || this.snapshotReady) return;
+            const plan = this.getReadPlan() || [];
+            if (!plan.length) {
+                this.snapshotPending = false;
+                this.onStatus(this.status({ key: "live.needVar" }));
+                return;
+            }
+            const samples = await this.read(plan, session, epoch);
             if (epoch !== this.epoch || !this.canRead || session !== this.activeSession) return;
             this.consecutiveErrors = 0;
             this.snapshotPending = false;
@@ -541,12 +642,20 @@ class DebugSessionBridge {
         return { action, threadId, before, status };
     }
 
-    async read(items, session = this.activeSession) {
+    async read(items, session = this.activeSession, expectedEpoch = null) {
         if (!session || this.conflict) throw new Error("No unique Cortex-Debug session is available");
         if (!this.capabilities.read) throw new Error("Cortex-Debug does not support DAP readMemory");
         const samples = [];
         for (const group of mergeReadPlan(items)) {
+            if (expectedEpoch !== null && expectedEpoch !== this.epoch)
+                throw Object.assign(new Error("DAP memory read was cancelled by a target state change"), {
+                    code: "DEBUG_STATE_CHANGED"
+                });
             const data = await this._readBlock(session, group.address, group.size);
+            if (expectedEpoch !== null && expectedEpoch !== this.epoch)
+                throw Object.assign(new Error("DAP memory read was cancelled by a target state change"), {
+                    code: "DEBUG_STATE_CHANGED"
+                });
             for (const item of group.items) {
                 const offset = item.address - group.address;
                 const bytes = data.slice(offset, Math.min(data.length, offset + item.size));
@@ -560,7 +669,8 @@ class DebugSessionBridge {
     async readPausedItems(items) {
         const session = this.assertPausedAccess();
         const stopEpoch = this.stopEpoch;
-        const samples = await this.read(items, session);
+        const epoch = this.epoch;
+        const samples = await this.read(items, session, epoch);
         if (session !== this.activeSession || !this.paused || this.stopEpoch !== stopEpoch)
             throw Object.assign(new Error("Target state changed during paused DAP memory read"), {
                 code: "TARGET_NOT_PAUSED",

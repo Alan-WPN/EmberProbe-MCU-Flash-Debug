@@ -9,7 +9,7 @@ const {
     mergeReadPlan
 } = require("../src/services/debugSessionBridge");
 
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 (async () => {
     const groups = mergeReadPlan([
@@ -24,6 +24,9 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     const requests = [];
     const samples = [];
     const statuses = [];
+    const targetStates = [];
+    const targetEvents = [];
+    let quiesceCalls = 0;
     let readPlan = [{ name: "x", address: 0x20000000, size: 4 }];
     const memory = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]);
     const session = {
@@ -34,7 +37,10 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
             requests.push({ command, args });
             if (command === "readMemory") {
                 const address = Number.parseInt(args.memoryReference, 16);
-                return { address: args.memoryReference, data: memory.subarray(address - 0x20000000, address - 0x20000000 + args.count).toString("base64") };
+                return {
+                    address: args.memoryReference,
+                    data: memory.subarray(address - 0x20000000, address - 0x20000000 + args.count).toString("base64")
+                };
             }
             if (command === "writeMemory") return { bytesWritten: Buffer.from(args.data, "base64").length };
             throw new Error("unexpected request");
@@ -43,8 +49,15 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     const bridge = new DebugSessionBridge({
         getReadPlan: () => readPlan,
         getIntervalMs: () => 1,
-        onSamples: value => samples.push(value),
-        onStatus: value => statuses.push(value)
+        onSamples: (value) => samples.push(value),
+        onStatus: (value) => statuses.push(value),
+        onTargetState: (value) => {
+            targetStates.push(value.state);
+            targetEvents.push(value);
+        },
+        beforePausedRead: async () => {
+            quiesceCalls++;
+        }
     });
     bridge.setWorkspace(session.workspaceFolder);
     bridge.attach(session);
@@ -52,7 +65,12 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     await delay(20);
     assert.strictEqual(requests.length, 0, "running targets must never be read");
 
-    bridge.handleMessage(session, { type: "response", command: "initialize", success: true, body: { supportsReadMemoryRequest: true, supportsWriteMemoryRequest: true } });
+    bridge.handleMessage(session, {
+        type: "response",
+        command: "initialize",
+        success: true,
+        body: { supportsReadMemoryRequest: true, supportsWriteMemoryRequest: true }
+    });
     bridge.handleMessage(session, { type: "event", event: "stopped" });
     const directPausedRead = await bridge.readPausedItems([{ name: "direct", address: 0x20000000, size: 4 }]);
     assert.deepStrictEqual([...directPausedRead[0].bytes], [1, 2, 3, 4]);
@@ -63,6 +81,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert.deepStrictEqual([...samples[0][0].bytes], [1, 2, 3, 4]);
     assert.strictEqual(bridge.status().mode, "debug-paused-ready");
     assert.strictEqual(bridge.status().snapshotReady, true);
+    assert.ok(quiesceCalls >= 1, "paused DAP reads should wait for managed Tcl reads to quiesce");
     assert.strictEqual(bridge.canWrite, true);
     const pausedRequestCount = requests.length;
     await delay(MIN_DAP_INTERVAL_MS + 20);
@@ -71,9 +90,31 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     bridge.refreshSnapshot();
     await delay(SNAPSHOT_INITIAL_DELAY_MS + 40);
     assert.strictEqual(samples.length, 2, "changing the watch plan while paused should refresh one snapshot");
-    assert.deepStrictEqual(samples[1].map(item => item.name), ["x", "y"]);
+    assert.deepStrictEqual(
+        samples[1].map((item) => item.name),
+        ["x", "y"]
+    );
 
+    bridge.handleRequest(session, { type: "request", command: "stepOut" });
+    assert.strictEqual(targetEvents.at(-1).state, "transition");
+    assert.strictEqual(targetEvents.at(-1).transition, "step");
+    assert.strictEqual(bridge.status().snapshotReady, false, "a step request must invalidate the paused snapshot");
+    assert.strictEqual(
+        bridge.canRead,
+        false,
+        "direct paused reads must be blocked while execution control is in progress"
+    );
+    await assert.rejects(
+        () => bridge.readPausedItems([{ name: "blocked", address: 0x20000000, size: 4 }]),
+        (error) => error.code === "DEBUG_STATE_TRANSITION"
+    );
     bridge.handleMessage(session, { type: "event", event: "continued" });
+    assert.deepStrictEqual(targetStates.slice(0, 3), ["stopped", "transition", "continued"]);
+    assert.strictEqual(
+        targetEvents.at(-1).transition,
+        "step",
+        "step continuation must remain distinguishable from free run"
+    );
     const requestCount = requests.length;
     await delay(MIN_DAP_INTERVAL_MS + 20);
     assert.strictEqual(requests.length, requestCount, "continued targets must not be read or written");
@@ -81,14 +122,29 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
     bridge.handleMessage(session, { type: "event", event: "stopped" });
     await delay(SNAPSHOT_INITIAL_DELAY_MS + 40);
+    bridge.handleRequest(session, { type: "request", command: "next", seq: 42 });
+    bridge.handleMessage(session, {
+        type: "response",
+        command: "next",
+        request_seq: 42,
+        success: false
+    });
+    assert.strictEqual(targetEvents.at(-1).state, "transition-failed");
+    await delay(SNAPSHOT_INITIAL_DELAY_MS + 40);
+    assert.strictEqual(
+        bridge.status().snapshotReady,
+        true,
+        "a rejected step request should restore the paused snapshot"
+    );
+
     const tx = await bridge.writeAndVerify([{ name: "x", address: 0x20000000, bytes: Uint8Array.from([9, 9, 9, 9]) }]);
     assert.strictEqual(tx.before.length, 1);
     assert.strictEqual(tx.after.length, 1);
-    assert(requests.some(item => item.command === "writeMemory"));
+    assert(requests.some((item) => item.command === "writeMemory"));
 
     bridge.setIntent(false);
     assert.strictEqual(bridge.canRead, false);
-    assert(statuses.some(status => status.mode === "debug-running-waiting"));
+    assert(statuses.some((status) => status.mode === "debug-running-waiting"));
     bridge.dispose();
 
     let optInReads = 0;
@@ -104,17 +160,29 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     };
     const optIn = new DebugSessionBridge({
         getReadPlan: () => [{ name: "x", address: 0x20000000, size: 4 }],
-        onSamples: value => optInSamples.push(value),
+        onSamples: (value) => optInSamples.push(value),
         onStatus() {}
     });
     optIn.setWorkspace(optInSession.workspaceFolder);
     optIn.attach(optInSession);
-    optIn.handleMessage(optInSession, { type: "response", command: "initialize", body: { supportsReadMemoryRequest: true, supportsWriteMemoryRequest: true } });
+    optIn.handleMessage(optInSession, {
+        type: "response",
+        command: "initialize",
+        body: { supportsReadMemoryRequest: true, supportsWriteMemoryRequest: true }
+    });
     assert.strictEqual(optIn.intentEnabled, false);
-    assert.strictEqual(optIn.status().mode, "debug-running-waiting", "a running debug target should be visible before sampling is enabled");
+    assert.strictEqual(
+        optIn.status().mode,
+        "debug-running-waiting",
+        "a running debug target should be visible before sampling is enabled"
+    );
     optIn.setIntent(true);
     await delay(SNAPSHOT_INITIAL_DELAY_MS + 30);
-    assert.strictEqual(optInReads, 0, "enabling sampling while debugging runs must not contend for the probe or read DAP memory");
+    assert.strictEqual(
+        optInReads,
+        0,
+        "enabling sampling while debugging runs must not contend for the probe or read DAP memory"
+    );
     optIn.handleMessage(optInSession, { type: "event", event: "stopped" });
     optIn.setIntent(false);
     await delay(SNAPSHOT_INITIAL_DELAY_MS + 30);
@@ -136,7 +204,11 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert.strictEqual(conflict.conflict, true);
     assert.strictEqual(conflict.status().mode, "debug-session-conflict");
     conflict.detach(second);
-    conflict.handleMessage(session, { type: "response", command: "initialize", body: { supportsReadMemoryRequest: false, supportsWriteMemoryRequest: false } });
+    conflict.handleMessage(session, {
+        type: "response",
+        command: "initialize",
+        body: { supportsReadMemoryRequest: false, supportsWriteMemoryRequest: false }
+    });
     conflict.handleMessage(session, { type: "event", event: "stopped" });
     assert.strictEqual(conflict.status().mode, "debug-paused-unsupported");
     conflict.handleMessage(session, { type: "event", event: "terminated" });
@@ -158,22 +230,60 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     };
     const retryBridge = new DebugSessionBridge({
         getReadPlan: () => [{ name: "x", address: 0x20000000, size: 4 }],
-        onSamples: value => retrySamples.push(value),
+        onSamples: (value) => retrySamples.push(value),
         onStatus() {},
         onError() {}
     });
     retryBridge.setWorkspace(retrySession.workspaceFolder);
     retryBridge.attach(retrySession);
     retryBridge.setIntent(true);
-    retryBridge.handleMessage(retrySession, { type: "response", command: "initialize", body: { supportsReadMemoryRequest: true, supportsWriteMemoryRequest: true } });
+    retryBridge.handleMessage(retrySession, {
+        type: "response",
+        command: "initialize",
+        body: { supportsReadMemoryRequest: true, supportsWriteMemoryRequest: true }
+    });
     retryBridge.handleMessage(retrySession, { type: "event", event: "stopped" });
     await delay(SNAPSHOT_INITIAL_DELAY_MS + SNAPSHOT_RETRY_DELAYS_MS[0] + SNAPSHOT_RETRY_DELAYS_MS[1] + 100);
     assert.strictEqual(busyReads, 3, "transient DAP busy errors should be retried");
     assert.strictEqual(retrySamples.length, 1);
     assert.strictEqual(retryBridge.status().snapshotReady, true);
     retryBridge.dispose();
+
+    let quiesceAttempts = 0;
+    let readsAfterQuiesce = 0;
+    const quiesceSession = {
+        ...session,
+        id: "quiesce-retry",
+        async customRequest(command, args) {
+            if (command !== "readMemory") throw new Error("unexpected request");
+            readsAfterQuiesce++;
+            return { address: args.memoryReference, data: memory.subarray(0, args.count).toString("base64") };
+        }
+    };
+    const quiesceBridge = new DebugSessionBridge({
+        getReadPlan: () => [{ name: "x", address: 0x20000000, size: 4 }],
+        onStatus() {},
+        onError() {},
+        beforePausedRead: async () => {
+            quiesceAttempts++;
+            if (quiesceAttempts < 3) throw new Error("managed Tcl read is still active");
+        }
+    });
+    quiesceBridge.setWorkspace(quiesceSession.workspaceFolder);
+    quiesceBridge.attach(quiesceSession);
+    quiesceBridge.setIntent(true);
+    quiesceBridge.handleMessage(quiesceSession, {
+        type: "response",
+        command: "initialize",
+        body: { supportsReadMemoryRequest: true }
+    });
+    quiesceBridge.handleMessage(quiesceSession, { type: "event", event: "stopped" });
+    await delay(SNAPSHOT_INITIAL_DELAY_MS + SNAPSHOT_RETRY_DELAYS_MS[0] + SNAPSHOT_RETRY_DELAYS_MS[1] + 100);
+    assert.strictEqual(quiesceAttempts, 3, "a busy Tcl channel should be retried before taking a DAP snapshot");
+    assert.strictEqual(readsAfterQuiesce, 1, "DAP must not read memory until Tcl quiescence succeeds");
+    quiesceBridge.dispose();
     console.log("debug session bridge tests passed");
-})().catch(error => {
+})().catch((error) => {
     console.error(error);
     process.exitCode = 1;
 });

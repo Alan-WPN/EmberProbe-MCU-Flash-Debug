@@ -55,7 +55,9 @@ const DW_TAG_array_type = 0x01,
     DW_TAG_subrange_type = 0x21;
 const DW_AT_name = 0x03,
     DW_AT_byte_size = 0x0b,
+    DW_AT_abstract_origin = 0x31,
     DW_AT_encoding = 0x3e,
+    DW_AT_specification = 0x47,
     DW_AT_type = 0x49,
     DW_AT_location = 0x02,
     DW_AT_declaration = 0x3c,
@@ -415,7 +417,7 @@ function _parseDwarfInternal(buffer) {
 
     const dies = new Map(); // 节内偏移 → DIE 记录
     const childrenMap = new Map(); // 父 DIE 偏移 → [子 DIE 偏移]
-    const variables = []; // 具有固定地址的变量 DIE
+    const variableOffsets = []; // 所有变量 DIE；跨 CU 的 origin 继承需在完整解析后处理
     const infoStart = 0,
         infoEnd = info.size;
     const abbrevCache = new Map();
@@ -483,6 +485,12 @@ function _parseDwarfInternal(buffer) {
                         case DW_AT_type:
                             if (v && v.ref !== undefined) rec.typeRef = v.ref;
                             break;
+                        case DW_AT_abstract_origin:
+                            if (v && v.ref !== undefined) rec.abstractOriginRef = v.ref;
+                            break;
+                        case DW_AT_specification:
+                            if (v && v.ref !== undefined) rec.specificationRef = v.ref;
+                            break;
                         case DW_AT_byte_size:
                             if (typeof v === "number") rec.byteSize = v;
                             break;
@@ -529,14 +537,7 @@ function _parseDwarfInternal(buffer) {
                 }
                 rec.base = strOffsetsBase;
                 dies.set(dieOff, rec);
-                if (
-                    rec.tag === DW_TAG_variable &&
-                    rec.typeRef !== undefined &&
-                    rec.hasAddr &&
-                    (rec.name !== undefined || rec.strx !== undefined)
-                ) {
-                    variables.push(rec);
-                }
+                if (rec.tag === DW_TAG_variable) variableOffsets.push(dieOff);
                 // 有子项的 DIE 入栈
                 if (ab.hasChildren) {
                     parentStack.push({ offset: dieOff, dieOff });
@@ -551,6 +552,32 @@ function _parseDwarfInternal(buffer) {
     // 统一解析 strx 名称
     for (const d of dies.values()) {
         if (d.name === undefined && d.strx !== undefined) d.name = resolveStrx(d.strx, d.base);
+    }
+
+    // LTO 常把地址留在具体变量 DIE，而把名称和类型放进 abstract_origin/specification。
+    // 所有 CU 都完成后再继承，才能正确解析 DW_FORM_ref_addr 的跨 CU 引用。
+    const resolveVariableIdentity = (dieOff, seen = new Set()) => {
+        if (seen.has(dieOff) || seen.size >= 16) return { name: "", typeRef: undefined };
+        seen.add(dieOff);
+        const die = dies.get(dieOff);
+        if (!die) return { name: "", typeRef: undefined };
+        let name = die.name || "";
+        let typeRef = die.typeRef;
+        for (const parentRef of [die.abstractOriginRef, die.specificationRef]) {
+            if (parentRef === undefined || (name && typeRef !== undefined)) continue;
+            const inherited = resolveVariableIdentity(parentRef, new Set(seen));
+            if (!name) name = inherited.name;
+            if (typeRef === undefined) typeRef = inherited.typeRef;
+        }
+        return { name, typeRef };
+    };
+    const variables = [];
+    for (const dieOff of variableOffsets) {
+        const concrete = dies.get(dieOff);
+        if (!concrete?.hasAddr) continue;
+        const identity = resolveVariableIdentity(dieOff);
+        if (!identity.name || identity.typeRef === undefined) continue;
+        variables.push({ ...concrete, name: identity.name, typeRef: identity.typeRef });
     }
 
     return { dies, childrenMap, resolveStrx, variables };

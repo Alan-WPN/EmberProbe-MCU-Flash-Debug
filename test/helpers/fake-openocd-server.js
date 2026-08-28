@@ -1,4 +1,5 @@
 "use strict";
+const fs = require("fs");
 const net = require("net");
 
 const SUB = "\x1a";
@@ -8,6 +9,7 @@ class FakeOpenOcdServer {
         this.server = null;
         this.port = 0;
         this.commands = [];
+        this.responses = [];
         this.memory = new Map();
         this.sockets = new Set();
         this.state = "running";
@@ -53,11 +55,21 @@ class FakeOpenOcdServer {
             if (boundary >= 0) {
                 const inner = command.slice(prefix.length, boundary);
                 const result = this._execute(inner);
-                socket.write((result.ok ? "EP_OK:" : "EP_ERR:") + result.response + SUB);
+                const responseFile = command.match(/set _ep_file \[open "([^"]+)" w\]/);
+                if (responseFile) {
+                    fs.writeFileSync(responseFile[1], `${result.ok ? 0 : 1}\n${result.response}`);
+                    this.responses.push("");
+                    socket.write(SUB);
+                } else {
+                    const response = (result.ok ? "EP_OK:" : "EP_ERR:") + result.response;
+                    this.responses.push(response);
+                    socket.write(response + SUB);
+                }
                 return;
             }
         }
         const result = this._execute(command);
+        this.responses.push(result.response);
         socket.write(result.response + SUB);
     }
 

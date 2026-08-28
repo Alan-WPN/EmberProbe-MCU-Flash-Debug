@@ -17,7 +17,7 @@ node <skill-dir>/scripts/read-live.js --workspace <workspace> --variables Tick,s
 
 Do not search source files for their declarations first, do not ask the user to start sampling, and do not add type suffixes unless the user explicitly requests a reinterpretation. EmberProbe reads the latest ELF and DWARF information, resolves a uniquely matching name case-insensitively, and infers `u8/i8/u16/i16/u32/i32/f32/u64/i64/f64`.
 
-If live sampling is already active, EmberProbe reuses that connection. If the workspace Cortex-Debug session is paused, it reads through that session's DAP memory API without opening a competing probe; report `source: debug-session`. Otherwise, with no debug session, it starts the configured probe, reads once, and closes it immediately. A running debug target returns `PROBE_BUSY`; never pause it implicitly. Report the returned values, resolved names, types, and whether `source` is `active-sampling`, `debug-session`, or `temporary-probe`.
+If live sampling is already active, EmberProbe reuses that connection. If an EmberProbe-managed Cortex-Debug session is running, it reads only variables fully contained in writable allocated ELF RAM sections through the shared OpenOCD service; report `source: debug-running-openocd`. If the workspace Cortex-Debug session is paused, it reads through that session's DAP memory API without opening a competing probe; report `source: debug-session`. Otherwise, with no debug session, it starts the configured probe, reads once, and closes it immediately. A user-managed running Cortex-Debug session still returns `PROBE_BUSY`; never pause it implicitly. Report the returned values, resolved names, types, and source.
 
 Only use `--list` if EmberProbe reports that a name is missing or ambiguous:
 

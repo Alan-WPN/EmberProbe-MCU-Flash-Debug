@@ -38,6 +38,16 @@ assert.throws(
 );
 running.release();
 
+coordinator.setActive("debugStart", true);
+coordinator.setActive("debugServer", true);
+assert.strictEqual(coordinator.isActive("debugStart"), false);
+assert.strictEqual(coordinator.isActive("debugServer"), true);
+assert.throws(
+    () => coordinator.acquire("download"),
+    (error) => error.code === "PROBE_BUSY"
+);
+coordinator.setActive("debugServer", false);
+
 assert.throws(
     () => coordinator.isActive("unknown"),
     (error) => error.code === "INVALID_PROBE_OPERATION" && error.operation === "unknown"

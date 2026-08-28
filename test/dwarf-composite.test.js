@@ -202,4 +202,106 @@ assert.ok(gnuVar, "GNU 扩展 form 出现在 CU 中时，后续变量的复合�
 assert.strictEqual(gnuVar.kind, "struct");
 assert.deepStrictEqual(gnuVar.members.map(m => [m.name, m.offset, m.watchType]), [["v", 0, "i32"]]);
 
+// —— LTO 回归：具体变量 DIE 只有地址，名称和类型经跨 CU abstract_origin 继承 ——
+const ltoInfo = [];
+const patchU32 = (bytes, at, value) => {
+    bytes[at] = value & 0xff;
+    bytes[at + 1] = (value >>> 8) & 0xff;
+    bytes[at + 2] = (value >>> 16) & 0xff;
+    bytes[at + 3] = (value >>> 24) & 0xff;
+};
+const beginCu = bytes => {
+    const start = bytes.length;
+    bytes.push(...u32(0), 4, 0, ...u32(0), 4, 1); // v4 header + compile_unit
+    return start;
+};
+const endCu = (bytes, start) => {
+    bytes.push(0);
+    patchU32(bytes, start, bytes.length - start - 4);
+};
+const concreteVariable = (bytes, address) => {
+    bytes.push(2);
+    const originPatch = bytes.length;
+    bytes.push(...u32(0), 5, 0x03, ...u32(address));
+    return originPatch;
+};
+
+const concreteCu = beginCu(ltoInfo);
+const fsmOriginPatch = concreteVariable(ltoInfo, 0x20000000);
+const f32OriginPatch = concreteVariable(ltoInfo, 0x20000010);
+const f64OriginPatch = concreteVariable(ltoInfo, 0x20000018);
+endCu(ltoInfo, concreteCu);
+
+const originCu = beginCu(ltoInfo);
+const floatOff = ltoInfo.length;
+ltoInfo.push(3, ...str("float"), 0x04, 4);
+const doubleOff = ltoInfo.length;
+ltoInfo.push(3, ...str("double"), 0x04, 8);
+const structOff = ltoInfo.length;
+ltoInfo.push(4, ...str("Fsm"), 4);
+ltoInfo.push(5, ...str("state"), ...u32(floatOff - originCu), 0);
+ltoInfo.push(0);
+const typedefOff = ltoInfo.length;
+ltoInfo.push(6, ...str("Fsm_t"), ...u32(structOff - originCu));
+const volatileStructOff = ltoInfo.length;
+ltoInfo.push(7, ...u32(typedefOff - originCu));
+const volatileFloatOff = ltoInfo.length;
+ltoInfo.push(7, ...u32(floatOff - originCu));
+const volatileDoubleOff = ltoInfo.length;
+ltoInfo.push(7, ...u32(doubleOff - originCu));
+const fsmOriginOff = ltoInfo.length;
+ltoInfo.push(8, ...str("g_fsm"), ...u32(volatileStructOff - originCu));
+const f32OriginOff = ltoInfo.length;
+ltoInfo.push(8, ...str("g_f32"), ...u32(volatileFloatOff - originCu));
+const f64OriginOff = ltoInfo.length;
+ltoInfo.push(8, ...str("g_f64"), ...u32(volatileDoubleOff - originCu));
+endCu(ltoInfo, originCu);
+patchU32(ltoInfo, fsmOriginPatch, fsmOriginOff);
+patchU32(ltoInfo, f32OriginPatch, f32OriginOff);
+patchU32(ltoInfo, f64OriginPatch, f64OriginOff);
+
+const ltoAbbrev = Buffer.from([
+    1, 0x11, 1, 0, 0,                                         // compile_unit
+    2, 0x34, 0, 0x31, 0x10, 0x02, 0x18, 0, 0,                 // concrete variable: abstract_origin(ref_addr), location
+    3, 0x24, 0, 0x03, 0x08, 0x3e, 0x0b, 0x0b, 0x0b, 0, 0,    // base_type
+    4, 0x13, 1, 0x03, 0x08, 0x0b, 0x0b, 0, 0,                // structure_type
+    5, 0x0d, 0, 0x03, 0x08, 0x49, 0x13, 0x38, 0x0b, 0, 0,    // member
+    6, 0x16, 0, 0x03, 0x08, 0x49, 0x13, 0, 0,                // typedef
+    7, 0x35, 0, 0x49, 0x13, 0, 0,                            // volatile_type
+    8, 0x34, 0, 0x03, 0x08, 0x49, 0x13, 0, 0,                // origin variable: name, type
+    0
+]);
+const ltoDebugInfo = Buffer.from(ltoInfo);
+const ltoDiOff = 52;
+const ltoAbOff = ltoDiOff + ltoDebugInfo.length;
+const ltoShstrOff = ltoAbOff + ltoAbbrev.length;
+const ltoShoff = (ltoShstrOff + shstrtab.length + 3) & ~3;
+const ltoBuf = Buffer.alloc(ltoShoff + 4 * 40);
+buf.subarray(0, 52).copy(ltoBuf);
+ltoBuf.writeUInt32LE(ltoShoff, 32);
+ltoDebugInfo.copy(ltoBuf, ltoDiOff);
+ltoAbbrev.copy(ltoBuf, ltoAbOff);
+shstrtab.copy(ltoBuf, ltoShstrOff);
+const ltoSh = i => ltoShoff + i * 40;
+ltoBuf.writeUInt32LE(nameOff[".debug_info"], ltoSh(1));
+ltoBuf.writeUInt32LE(1, ltoSh(1) + 4);
+ltoBuf.writeUInt32LE(ltoDiOff, ltoSh(1) + 16);
+ltoBuf.writeUInt32LE(ltoDebugInfo.length, ltoSh(1) + 20);
+ltoBuf.writeUInt32LE(nameOff[".debug_abbrev"], ltoSh(2));
+ltoBuf.writeUInt32LE(1, ltoSh(2) + 4);
+ltoBuf.writeUInt32LE(ltoAbOff, ltoSh(2) + 16);
+ltoBuf.writeUInt32LE(ltoAbbrev.length, ltoSh(2) + 20);
+ltoBuf.writeUInt32LE(nameOff[".shstrtab"], ltoSh(3));
+ltoBuf.writeUInt32LE(3, ltoSh(3) + 4);
+ltoBuf.writeUInt32LE(ltoShstrOff, ltoSh(3) + 16);
+ltoBuf.writeUInt32LE(shstrtab.length, ltoSh(3) + 20);
+
+const ltoTypes = parseDwarfVariableTypes(ltoBuf);
+assert.strictEqual(ltoTypes.get("g_f32").watchType, "f32");
+assert.strictEqual(ltoTypes.get("g_f64").watchType, "f64");
+const ltoFsm = parseCompositeLayout(ltoBuf).get("g_fsm");
+assert.ok(ltoFsm, "LTO concrete variables should inherit composite types from abstract_origin");
+assert.strictEqual(ltoFsm.typeName, "Fsm_t");
+assert.deepStrictEqual(ltoFsm.members.map(member => [member.name, member.watchType]), [["state", "f32"]]);
+
 console.log("DWARF composite layout tests passed");

@@ -1,7 +1,12 @@
 "use strict";
 const assert = require("assert");
 const { EventEmitter } = require("events");
-const { LiveWatchSession } = require("../src/liveWatch");
+const {
+    LiveWatchSession,
+    ManagedOpenOcdSession,
+    validateManagedReadPlan,
+    MAX_DEBUG_READ_COMMANDS
+} = require("../src/liveWatch");
 const { FakeOpenOcdServer } = require("./helpers/fake-openocd-server");
 
 (async () => {
@@ -44,6 +49,102 @@ const { FakeOpenOcdServer } = require("./helpers/fake-openocd-server");
         await session.stop();
         await fake.stop();
     }
+
+    const debugFake = new FakeOpenOcdServer();
+    await debugFake.start();
+    debugFake.seed(0x20000000, [9, 8, 7, 6]);
+    const managed = new ManagedOpenOcdSession(null, { mode: "debug" }, {});
+    managed.socket = await debugFake.connect();
+    managed._setupSocket();
+    assert.deepStrictEqual(
+        (await managed.readOnce([{ name: "counter", address: 0x20000000, size: 4 }]))[0].bytes,
+        [9, 8, 7, 6]
+    );
+    assert.deepStrictEqual(debugFake.responses, [""], "managed debug reads must not emit Tcl values to GDB output");
+    await assert.rejects(
+        managed.writeOnce([{ address: 0x20000000, bytes: [1] }]),
+        error => error.code === "RUNTIME_WRITE_DISABLED"
+    );
+    assert.throws(
+        () => validateManagedReadPlan([{ name: "large", address: 0x20000000, size: 4097 }]),
+        error => error.code === "LIVE_READ_BUDGET_EXCEEDED"
+    );
+    assert.throws(
+        () => validateManagedReadPlan([{ name: "overflow", address: 0xffffffff, size: 2 }]),
+        error => error.code === "LIVE_ADDRESS_NOT_RAM"
+    );
+    assert.throws(
+        () => validateManagedReadPlan(Array.from({ length: MAX_DEBUG_READ_COMMANDS + 1 }, (_, index) => ({
+            name: `sparse-${index}`,
+            address: 0x20000000 + index * 8,
+            size: 1
+        }))),
+        error => error.code === "LIVE_READ_BUDGET_EXCEEDED"
+            && error.details.commandCount === MAX_DEBUG_READ_COMMANDS + 1,
+        "sparse variables must not create an unbounded number of Tcl requests"
+    );
+    let cancelledReadCalls = 0;
+    const cancelling = new ManagedOpenOcdSession(null, { mode: "debug" }, {});
+    cancelling.samplingEnabled = true;
+    cancelling._readMemoryBytes = async () => {
+        cancelledReadCalls++;
+        cancelling.setSamplingEnabled(false);
+        return [1];
+    };
+    await assert.rejects(
+        cancelling._readItems(
+            [
+                { name: "first", address: 0x20000000, size: 1 },
+                { name: "second", address: 0x20000008, size: 1 }
+            ],
+            Date.now(),
+            { epoch: cancelling.sampleEpoch, requireSampling: true, deadline: Date.now() + 1000 }
+        ),
+        error => error.code === "LIVE_READ_CANCELLED"
+    );
+    assert.strictEqual(cancelledReadCalls, 1, "a state change must prevent subsequent Tcl read groups");
+    cancelling.busy = true;
+    assert.strictEqual(await cancelling.waitForIdle(5), false, "quiesce timeout must be observable by the DAP bridge");
+    cancelling.busy = false;
+    let queuedReadCalls = 0;
+    const queuedRead = new ManagedOpenOcdSession(null, { mode: "debug" }, {});
+    queuedRead.socket = { destroyed: false };
+    queuedRead.busy = true;
+    queuedRead._readMemoryBytes = async () => { queuedReadCalls++; return [1]; };
+    const queuedPromise = queuedRead.readOnce([{ name: "queued", address: 0x20000000, size: 1 }]);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    queuedRead.setSamplingEnabled(false);
+    queuedRead.busy = false;
+    await assert.rejects(queuedPromise, error => error.code === "LIVE_READ_CANCELLED");
+    assert.strictEqual(queuedReadCalls, 0, "a queued Agent read must not start after the target state changes");
+    const lateSamples = [];
+    const epochSession = new ManagedOpenOcdSession(null, { mode: "debug", intervalMs: 100 }, {
+        onSample: samples => lateSamples.push(samples)
+    });
+    epochSession.socket = { destroyed: false };
+    epochSession.watch = [{ name: "late", address: 0x20000000, size: 4 }];
+    epochSession._readItems = async () => {
+        await new Promise(resolve => setTimeout(resolve, 20));
+        return { samples: [{ name: "late", bytes: [1, 2, 3, 4] }], ok: 1 };
+    };
+    epochSession.setSamplingEnabled(true);
+    const lateTick = epochSession._sampleTick();
+    epochSession.setSamplingEnabled(false);
+    await lateTick;
+    assert.deepStrictEqual(lateSamples, [], "samples completed after a stop epoch must be discarded");
+    if (epochSession.timer) clearInterval(epochSession.timer);
+    let reconnectRequested = false;
+    const debugTransportFailure = new ManagedOpenOcdSession(null, { mode: "debug" }, {});
+    debugTransportFailure._startCompleted = true;
+    debugTransportFailure.child = { killed: false, kill() { this.killed = true; } };
+    debugTransportFailure.socket = { destroyed: false, destroy() { this.destroyed = true; } };
+    debugTransportFailure._reconnectDebugTcl = () => { reconnectRequested = true; };
+    debugTransportFailure._abortConnection(new Error("Tcl disconnected"));
+    assert.strictEqual(debugTransportFailure.stopped, false, "a debug Tcl failure must not stop OpenOCD");
+    assert.strictEqual(debugTransportFailure.child.killed, false, "a debug Tcl failure must not kill GDB's server");
+    assert.strictEqual(reconnectRequested, true);
+    await managed.stop();
+    await debugFake.stop();
 
     // Reload Window 停用扩展时必须先让 OpenOCD 收到 shutdown 并退出，不能立即断 socket/杀进程。
     const child = new EventEmitter();

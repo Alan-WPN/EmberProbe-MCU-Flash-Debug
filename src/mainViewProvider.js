@@ -33,7 +33,8 @@ const {
     buildActiveReadPlan,
     nextLivePanelId,
     selectFocusedPanel,
-    selectPausedDebugReadSession
+    selectPausedDebugReadSession,
+    filterRuntimeRamPlan
 } = require("./services/liveWatchService");
 const { DebugSessionBridge, MIN_DAP_INTERVAL_MS } = require("./services/debugSessionBridge");
 const { SvdManager } = require("./services/svdManager");
@@ -141,6 +142,12 @@ class MainViewProvider {
         this._probeCoordinator = new ProbeCoordinator();
         this._recentProgress = [];
         this._liveSession = null;
+        this._managedDebugServer = null;
+        this._managedDebugToken = "";
+        this._managedDebugSessionId = "";
+        this._runtimeResumeTimer = null;
+        this._runtimeDeniedKey = "";
+        this._runtimeRamCache = null;
         this._livePanels = new Map();
         this._livePanelFocusOrder = 0;
         this._pendingCsvExports = new Map();
@@ -165,7 +172,9 @@ class MainViewProvider {
             getIntervalMs: () => Math.max(MIN_DAP_INTERVAL_MS, this._liveIntervalMs),
             onSamples: (samples, t) => this._handleRawSamples(samples, t),
             onStatus: status => this._postConsumerStatuses(status, !!status.error),
-            onError: error => this._postLive({ type: 'liveError', key: error.i18nKey, message: error.message || String(error) })
+            onError: error => this._postLive({ type: 'liveError', key: error.i18nKey, message: error.message || String(error) }),
+            onTargetState: event => this._handleManagedTargetState(event),
+            beforePausedRead: () => this._quiesceManagedRuntimeRead()
         });
         this._writeAuthorization = new WriteAuthorization(context.workspaceState);
         this._peripheralWriteAuthorization = new PeripheralWriteAuthorization();
@@ -283,6 +292,8 @@ class MainViewProvider {
     set _agentReadRunning(active) { this._probeCoordinator.setActive('agentRead', active); }
     get _debugStarting() { return this._probeCoordinator.isActive('debugStart'); }
     set _debugStarting(active) { this._probeCoordinator.setActive('debugStart', active); }
+    get _debugServerRunning() { return this._probeCoordinator.isActive('debugServer'); }
+    set _debugServerRunning(active) { this._probeCoordinator.setActive('debugServer', active); }
     // 当前界面语言（简体中文/English），由侧边栏或实时面板右上角按钮切换并持久化到全局状态
     _t(key, params) {
         return i18n.t(this._lang, key, params);
@@ -459,35 +470,34 @@ class MainViewProvider {
                 if (!openocdPath) return false;
                 const svdPath = cleanWindowsPath(resolvedSvdPath);
                 const launch = openocdScripts.resolveOpenOcdLaunch(openocdPath, debuggerCfg, mcuCore);
+                await this.prepareForCortexDebug(workspaceFolder);
+                probePrepared = true;
+                this._debugStarting = true;
+                const managed = await this._startManagedDebugServer(openocdPath, debuggerCfg, mcuCore,
+                    vscode.workspace.getConfiguration('emberprobe'));
+                this._debugServerRunning = true;
+                this._managedDebugToken = crypto.randomUUID();
                 const debugConfig = {
                     type: 'cortex-debug',
                     name: this._t('msg.debugConfigName'),
                     request: 'launch',
-                    // OpenOCD 的 find 会优先搜索 cwd；使用可信 scripts 目录，避免工作区伪造同名 Tcl/cfg。
                     cwd: launch.cwd,
                     executable: elfPath,
-                    servertype: 'openocd',
-                    serverpath: launch.executable,
-                    searchDir: [launch.scriptsRoot],
-                    configFiles: [
-                        launch.probePath,
-                        launch.targetPath
-                    ],
-                    // Cortex-Debug 也会调用 OpenOCD 的 flash 算法，保留 work-area 但开启备份恢复。
-                    openOCDLaunchCommands: [
-                        'foreach _ep_target [target names] { $_ep_target configure -work-area-backup 1 }'
-                    ]
+                    servertype: 'external',
+                    gdbTarget: managed.gdbTarget,
+                    showDevDebugOutput: 'none',
+                    __emberprobeManagedToken: this._managedDebugToken
                 };
                 if (svdPath) debugConfig.svdFile = svdPath;
                 const cortexTools = resolveCortexToolchainForWorkspace(vscode, workspaceFolder);
                 if (cortexTools?.objdumpPath) debugConfig.objdumpPath = cortexTools.objdumpPath;
-                await this.prepareForCortexDebug(workspaceFolder);
-                probePrepared = true;
-                this._debugStarting = true;
-                const started = await vscode.debug.startDebugging(workspaceFolder, debugConfig);
+                const started = await vscode.debug.startDebugging(workspaceFolder, debugConfig, {
+                    suppressDebugView: true
+                });
                 if (!started) {
                     vscode.window.showErrorMessage(this._t('msg.debugStartFailed'));
                     if (this._debugStarting) this._debugStarting = false;
+                    await this._stopManagedDebugServer();
                     await this.restoreSamplingAfterDebug();
                     return false;
                 }
@@ -499,6 +509,7 @@ class MainViewProvider {
                 vscode.window.showErrorMessage(this._t('msg.debugFailed', { error: errorMsg }));
                 if (probePrepared) {
                     if (this._debugStarting) this._debugStarting = false;
+                    await this._stopManagedDebugServer();
                     await this.restoreSamplingAfterDebug();
                 }
                 throw err; // 上抛给消息分发器，向 Webview 反馈 commandError 而非 commandSuccess
@@ -810,11 +821,12 @@ class MainViewProvider {
         return this._withAgentProbe(async ({ session, source, temporary }) => {
             if (temporary && syncStatus) this._postAgentSampling(true, 'live.agentSampling', { current: 0, total: count });
             const result = [];
+            const effectiveIntervalMs = source === 'debug-running-openocd' ? Math.max(100, intervalMs) : intervalMs;
             for (let index = 0; index < count; index++) {
                 if (temporary && !this._agentReadRunning) throw Object.assign(new Error('Agent sampling was cancelled by the user'), { code: 'AGENT_READ_CANCELLED' });
                 result.push(this._decodeAgentSample(plan, await session.readOnce(readItems), compositePlan));
                 if (temporary && syncStatus) this._postAgentSampling(true, 'live.agentSampling', { current: index + 1, total: count });
-                if (index + 1 < count) await this._waitAgentInterval(intervalMs);
+                if (index + 1 < count) await this._waitAgentInterval(effectiveIntervalMs);
             }
             return { source, elf: elfResult.elf, samples: result };
         }, { syncStatus, total: count, allowPausedDebugRead: true });
@@ -831,6 +843,163 @@ class MainViewProvider {
         const port = await liveWatch.findFreePort();
         return port || 6666;
     }
+    _runtimeRamPlan(items, strict = false) {
+        const elfResult = this.readElfSymbols();
+        if (!this._runtimeRamCache || this._runtimeRamCache.sha256 !== elfResult.elf.sha256) {
+            const parsed = elfSymbols.parseElfSections(fs.readFileSync(elfResult.elf.path));
+            this._runtimeRamCache = { sha256: elfResult.elf.sha256, sections: parsed.sections };
+        }
+        const result = filterRuntimeRamPlan(items, this._runtimeRamCache.sections);
+        if (strict && result.denied.length) {
+            throw Object.assign(new Error('Runtime reads are restricted to writable allocated ELF RAM sections'), {
+                code: 'LIVE_ADDRESS_NOT_RAM',
+                details: {
+                    variables: result.denied.map(item => ({
+                        name: item.name,
+                        address: `0x${(Number(item.address) >>> 0).toString(16).toUpperCase()}`,
+                        size: item.size
+                    }))
+                }
+            });
+        }
+        liveWatch.validateManagedReadPlan(result.allowed);
+        return result;
+    }
+    _configureManagedRuntimeWatch() {
+        const server = this._managedDebugServer;
+        if (!server) return [];
+        const plan = this._runtimeRamPlan(this._activeReadPlan());
+        server.setWatch(plan.allowed);
+        const deniedKey = plan.denied.map(item => `${item.name}:${item.address}:${item.size}`).join('|');
+        if (deniedKey && deniedKey !== this._runtimeDeniedKey) {
+            this._runtimeDeniedKey = deniedKey;
+            const t = Date.now();
+            this._handleRawSamples(plan.denied.map(item => ({ name: item.name, bytes: null, t })), t);
+            this._postLive({
+                type: 'liveError',
+                key: 'live.runtimeAddressRejectedNames',
+                params: { names: plan.denied.map(item => item.name).join(', ') }
+            });
+        } else if (!deniedKey) this._runtimeDeniedKey = '';
+        return plan.allowed;
+    }
+    async _startManagedDebugServer(executable, probe, target, cfg) {
+        let lastError = null;
+        const inspect = typeof cfg.inspect === 'function' ? cfg.inspect('tclPort') : null;
+        const fixedTcl = !!(inspect && (inspect.workspaceValue !== undefined || inspect.globalValue !== undefined));
+        for (let attempt = 0; attempt < (fixedTcl ? 1 : 3); attempt++) {
+            const tclPort = fixedTcl ? await this._resolveTclPort(cfg) : (await liveWatch.findFreePort()) || 6666;
+            let gdbPort = (await liveWatch.findFreePort()) || 3333;
+            if (gdbPort === tclPort) gdbPort = (await liveWatch.findFreePort()) || 3334;
+            const server = new liveWatch.ManagedOpenOcdSession(vscode, {
+                executable,
+                probe,
+                target,
+                port: tclPort,
+                gdbPort,
+                mode: 'debug',
+                intervalMs: Math.max(100, this._liveIntervalMs)
+            }, {
+                onSample: (samples, t) => this._handleRawSamples(samples, t),
+                onStatus: status => {
+                    if (status?.key === 'live.debugRuntimeSampling' || status?.key === 'live.debugTclDegraded') {
+                        this._postConsumerStatuses({
+                            mode: status.key === 'live.debugRuntimeSampling' ? 'debug-running-sampling' : 'debug-running-degraded',
+                            key: status.key,
+                            source: 'openocd',
+                            canRead: status.key === 'live.debugRuntimeSampling',
+                            canWrite: false,
+                            snapshotReady: status.key === 'live.debugRuntimeSampling',
+                            intentEnabled: this._samplingIntent,
+                            running: this._samplingIntent
+                        });
+                    }
+                },
+                onError: message => this._postLive({ type: 'liveError', message: message?.message || String(message) }),
+                onDegraded: error => this._postConsumerStatuses({
+                    mode: 'debug-running-degraded', key: 'live.debugTclDegraded', source: 'openocd',
+                    canRead: false, canWrite: false, snapshotReady: false, message: error?.message
+                }, true),
+                onDisconnect: error => this._postConsumerStatuses({
+                    mode: 'debug-server-exited', key: error?.i18nKey || 'live.serviceExited', source: 'none',
+                    canRead: false, canWrite: false, snapshotReady: false, message: error?.message
+                }, true)
+            });
+            this._managedDebugServer = server;
+            try {
+                const info = await server.start();
+                return info;
+            } catch (error) {
+                lastError = error;
+                try { await server.stop(); } catch { /* ignore */ }
+                if (this._managedDebugServer === server) this._managedDebugServer = null;
+                if (fixedTcl || !/address already in use|couldn't bind|bind failed|in use/i.test(error.message || '')) break;
+            }
+        }
+        throw lastError || new Error('Unable to start managed OpenOCD');
+    }
+    async _stopManagedDebugServer() {
+        if (this._runtimeResumeTimer) clearTimeout(this._runtimeResumeTimer);
+        this._runtimeResumeTimer = null;
+        const server = this._managedDebugServer;
+        this._managedDebugServer = null;
+        this._managedDebugToken = '';
+        this._managedDebugSessionId = '';
+        this._runtimeDeniedKey = '';
+        if (server) {
+            server.setSamplingEnabled(false);
+            try { await server.stop(); } catch { /* ignore */ }
+        }
+        if (this._debugServerRunning) this._debugServerRunning = false;
+    }
+    async _quiesceManagedRuntimeRead() {
+        const server = this._managedDebugServer;
+        if (!server) return;
+        server.setSamplingEnabled(false);
+        const idle = await server.waitForIdle(2000);
+        if (!idle) {
+            throw Object.assign(new Error('Timed out waiting for the managed OpenOCD runtime read to finish'), {
+                code: 'LIVE_READ_QUIESCE_TIMEOUT',
+                retryable: true
+            });
+        }
+    }
+    _handleManagedTargetState(event) {
+        if (!event?.session || !this._managedDebugSessionId || event.session.id !== this._managedDebugSessionId) return;
+        if (this._runtimeResumeTimer) clearTimeout(this._runtimeResumeTimer);
+        this._runtimeResumeTimer = null;
+        const server = this._managedDebugServer;
+        if (!server) return;
+        server.setSamplingEnabled(false);
+        if (event.state !== 'continued') return;
+        if (event.transition && event.transition !== 'continue') return;
+        const epoch = event.epoch;
+        this._runtimeResumeTimer = setTimeout(() => {
+            this._runtimeResumeTimer = null;
+            if (!this._managedDebugServer || this._managedDebugServer !== server || this._debugBridge.paused
+                || this._debugBridge.stopEpoch !== epoch || !this._samplingIntent) return;
+            try {
+                const allowed = this._configureManagedRuntimeWatch();
+                if (!allowed.length) {
+                    this._postConsumerStatuses({ mode: 'debug-running-waiting', key: 'live.needVar', source: 'openocd', canRead: false, canWrite: false, snapshotReady: false });
+                    return;
+                }
+                const enabled = server.setSamplingEnabled(true);
+                this._postConsumerStatuses({
+                    mode: enabled ? 'debug-running-sampling' : 'debug-running-degraded',
+                    key: enabled ? 'live.debugRuntimeSampling' : 'live.debugTclDegraded', source: 'openocd',
+                    canRead: enabled, canWrite: false, snapshotReady: enabled, intentEnabled: true, running: true
+                });
+            } catch (error) {
+                server.setSamplingEnabled(false);
+                this._postConsumerStatuses({
+                    mode: 'debug-running-degraded',
+                    key: error.code === 'LIVE_READ_BUDGET_EXCEEDED' ? 'live.runtimeBudgetExceeded' : 'live.runtimeAddressRejected',
+                    source: 'openocd', canRead: false, canWrite: false, snapshotReady: false, message: error.message
+                }, true);
+            }
+        }, 150);
+    }
     async _withAgentProbe(handler, options = {}) {
         const syncStatus = !!options.syncStatus;
         const total = options.total || 0;
@@ -846,6 +1015,24 @@ class MainViewProvider {
         if (!session && options.allowPausedDebugRead) {
             session = selectPausedDebugReadSession(this._debugBridge);
             if (session) source = 'debug-session';
+            else if (this._managedDebugServer && this._managedDebugSessionId
+                && this._debugBridge.agentStatus().state === 'running') {
+                const managed = this._managedDebugServer;
+                session = {
+                    readOnce: async items => {
+                        const plan = this._runtimeRamPlan(items, true);
+                        const epoch = this._debugBridge.stopEpoch;
+                        const samples = await managed.readOnce(plan.allowed);
+                        if (this._debugBridge.stopEpoch !== epoch || this._debugBridge.agentStatus().state !== 'running') {
+                            throw Object.assign(new Error('Debug target state changed during the runtime read'), {
+                                code: 'DEBUG_STATE_CHANGED', retryable: true
+                            });
+                        }
+                        return samples;
+                    }
+                };
+                source = 'debug-running-openocd';
+            }
         }
         if (!session) {
             if (this._agentReadRunning) throw Object.assign(new Error('Another Agent variable read is in progress'), { code: 'AGENT_READ_BUSY' });
@@ -1359,6 +1546,7 @@ class MainViewProvider {
             intentEnabled: this._samplingIntent,
             canRead: this._liveWatchRunning || this._debugBridge.canRead,
             canWrite: this._liveWatchRunning || this._debugBridge.canWrite,
+            snapshotReady: this._debugBridge.hasSession ? this._debugBridge.snapshotReady : this._liveWatchRunning,
             mode: this._debugBridge.hasSession ? this._debugBridge.status().mode : (this._liveWatchRunning ? 'standalone-sampling' : 'stopped'),
             source: this._debugBridge.hasSession ? 'dap' : (this._liveWatchRunning ? 'openocd' : 'none'),
             key: this._debugBridge.hasSession ? this._debugBridge.status().key : (this._liveWatchRunning ? 'sb.sampling' : 'sb.stopped')
@@ -1388,6 +1576,7 @@ class MainViewProvider {
             intentEnabled: this._samplingIntent,
             canRead: this._liveWatchRunning || this._debugBridge.canRead,
             canWrite: this._liveWatchRunning || this._debugBridge.canWrite,
+            snapshotReady: this._debugBridge.hasSession ? this._debugBridge.snapshotReady : this._liveWatchRunning,
             mode: this._debugBridge.hasSession ? this._debugBridge.status().mode : (this._liveWatchRunning ? 'standalone-sampling' : 'stopped'),
             source: this._debugBridge.hasSession ? 'dap' : (this._liveWatchRunning ? 'openocd' : 'none'),
             key: this._debugBridge.hasSession ? this._debugBridge.status().key : (this._liveWatchRunning ? 'sb.sampling' : 'sb.stopped')
@@ -1476,6 +1665,27 @@ class MainViewProvider {
         if (this._debugBridge.hasSession) {
             const planKey = active.map(item => `${item.name}:${item.address}:${item.size}`).join('|');
             this._debugBridge.setIntent(this._samplingIntent);
+            if (this._managedDebugServer && this._managedDebugSessionId && !this._debugBridge.paused) {
+                try {
+                    const allowed = this._configureManagedRuntimeWatch();
+                    const enabled = this._managedDebugServer.setSamplingEnabled(this._samplingIntent && allowed.length > 0);
+                    this._postConsumerStatuses({
+                        mode: enabled ? 'debug-running-sampling' : allowed.length ? 'debug-running-degraded' : 'debug-running-waiting',
+                        key: enabled ? 'live.debugRuntimeSampling' : allowed.length ? 'live.debugTclDegraded' : 'live.needVar',
+                        source: 'openocd', canRead: enabled, canWrite: false,
+                        snapshotReady: enabled, intentEnabled: this._samplingIntent, running: this._samplingIntent
+                    });
+                } catch (error) {
+                    this._managedDebugServer.setSamplingEnabled(false);
+                    this._postConsumerStatuses({
+                        mode: 'debug-running-degraded',
+                        key: error.code === 'LIVE_READ_BUDGET_EXCEEDED' ? 'live.runtimeBudgetExceeded' : 'live.runtimeAddressRejected',
+                        source: 'openocd', canRead: false, canWrite: false, snapshotReady: false, message: error.message
+                    }, true);
+                }
+                this._debugReadPlanKey = planKey;
+                return;
+            }
             if (planKey !== this._debugReadPlanKey) {
                 this._debugReadPlanKey = planKey;
                 this._debugBridge.refreshSnapshot();
@@ -1514,8 +1724,19 @@ class MainViewProvider {
         if (intervalMs !== undefined) this._setLiveInterval(intervalMs);
         const activeItems = this._activeReadPlan();
         if (this._debugBridge.hasSession || vscode.debug.activeDebugSession?.type === 'cortex-debug' || this._debugStarting || this._debugCommandPending) {
-            const status = this._debugBridge.hasSession
-                ? this._debugBridge.status(activeItems.length ? {} : { key: 'live.needVar' })
+            const managedRunning = !!this._managedDebugServer && !!this._managedDebugSessionId
+                && this._debugBridge.hasSession && !this._debugBridge.paused;
+            if (managedRunning && activeItems.length) {
+                this._handleManagedTargetState({
+                    state: 'continued',
+                    epoch: this._debugBridge.stopEpoch,
+                    session: this._debugBridge.activeSession
+                });
+            }
+            const status = managedRunning
+                ? { mode: 'debug-running-connecting', key: 'live.debugSharedConnecting', source: 'openocd', canRead: false, canWrite: false, snapshotReady: false, intentEnabled: true, running: true }
+                : this._debugBridge.hasSession
+                    ? this._debugBridge.status(activeItems.length ? {} : { key: 'live.needVar' })
                 : { mode: this._debugStarting || this._debugCommandPending ? 'debug-running-waiting' : 'debug-session-conflict', key: this._debugStarting || this._debugCommandPending ? 'live.debugWaiting' : 'live.debugConflict', source: 'dap', canRead: false, canWrite: false, snapshotReady: false };
             this._postConsumerStatuses(status);
             return;
@@ -1586,6 +1807,7 @@ class MainViewProvider {
         if (!preserveIntent) {
             this._samplingIntent = false;
             this._debugBridge.setIntent(false);
+            if (this._managedDebugServer) this._managedDebugServer.setSamplingEnabled(false);
         }
         this._postConsumerStatuses(preserveIntent && this._debugBridge.hasSession ? this._debugBridge.status() : { key: preserveIntent ? 'live.restoring' : 'sb.stopped' });
         return stopped;
@@ -1594,8 +1816,15 @@ class MainViewProvider {
     stopLiveWatchIfRunning() {
         if (this._liveWatchRunning) this.stopLiveWatch({ preserveIntent: true });
     }
-    async prepareForCortexDebug(folder) {
+    async prepareForCortexDebug(folder, config) {
         this._debugBridge.setWorkspace(folder || this._commandContext().folder);
+        const token = config?.__emberprobeManagedToken;
+        if (token && token === this._managedDebugToken && this._managedDebugServer) return;
+        if (this._managedDebugServer) {
+            throw Object.assign(new Error('The debug probe is owned by an EmberProbe managed debug session'), {
+                code: 'PROBE_BUSY'
+            });
+        }
         const agentStopped = this.stopAgentReadIfRunning();
         if (agentStopped) await agentStopped;
         if (this._liveWatchRunning || this._liveSession) {
@@ -1611,17 +1840,28 @@ class MainViewProvider {
         this._debugReadPlanKey = this._activeReadPlan().map(item => `${item.name}:${item.address}:${item.size}`).join('|');
         // 多根工作区中会话归属以 VS Code 实际调试目录为准，避免被缓存 ELF 所在目录覆盖。
         this._debugBridge.setWorkspace(session.workspaceFolder || this._commandContext().folder);
+        if (session.configuration?.__emberprobeManagedToken
+            && session.configuration.__emberprobeManagedToken === this._managedDebugToken
+            && this._managedDebugServer) {
+            this._managedDebugSessionId = session.id;
+            this._managedDebugServer.setSamplingEnabled(false);
+        }
         this._debugBridge.attach(session);
         this._debugBridge.setIntent(this._samplingIntent);
     }
     handleDebugAdapterMessage(session, message) {
         this._debugBridge.handleMessage(session, message);
     }
+    handleDebugAdapterRequest(session, message) {
+        this._debugBridge.handleRequest(session, message);
+    }
     async handleDebugSessionTerminate(session) {
         if (!session || session.type !== 'cortex-debug') return;
+        const managed = !!this._managedDebugSessionId && session.id === this._managedDebugSessionId;
         this._debugBridge.detach(session);
         if (this._debugBridge.hasSession) return;
         this._debugReadPlanKey = '';
+        if (managed) await this._stopManagedDebugServer();
         await this.restoreSamplingAfterDebug();
     }
     async restoreSamplingAfterDebug() {
@@ -1629,6 +1869,7 @@ class MainViewProvider {
             this._postConsumerStatuses(this._debugBridge.status());
             return;
         }
+        if (this._managedDebugServer) await this._stopManagedDebugServer();
         if (!this._samplingIntent) {
             this._postConsumerStatuses({ mode: 'stopped', key: 'sb.stopped', source: 'none' });
             return;
@@ -1648,6 +1889,12 @@ class MainViewProvider {
     shutdown() {
         if (this._shutdownPromise) return this._shutdownPromise;
         this._shutdownPromise = (async () => {
+            const managedSession = this._debugBridge.activeSession;
+            if (managedSession && managedSession.id === this._managedDebugSessionId) {
+                try { await vscode.debug.stopDebugging(managedSession); } catch { /* ignore */ }
+                try { await this._debugBridge.waitForState(status => status.state === 'none', 1500); } catch { /* bounded shutdown */ }
+            }
+            await this._stopManagedDebugServer();
             const stopped = this.stopLiveWatch();
             if (stopped) await stopped;
             this.disposeDebugBridge();

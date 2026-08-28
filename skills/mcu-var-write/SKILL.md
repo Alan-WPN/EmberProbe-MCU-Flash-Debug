@@ -45,3 +45,5 @@ Before authorization, the script prints a confirmation JSON object and performs 
 ## Failure diagnostics
 
 On failure, parse the single JSON `diagnostic` object on stderr (`error.code`, `likelyCause`, `suggestedActions`). Distinguish `WRITE_CONFIRMATION_INVALID` (expired, reused, or changed request), `WRITE_NOT_ALLOWED` (target not in RAM), `WRITE_TYPE_UNKNOWN` (no reliable DWARF type), `ELF_CHANGED_DURING_WRITE_CONFIRMATION` (ELF changed after confirmation was requested), `INVALID_WRITE_VALUE`, `VARIABLE_NOT_FOUND`, `PROBE_BUSY`, and `TARGET_NOT_CONNECTED`.
+
+Do not attempt writes while an EmberProbe-managed Cortex-Debug target is running. Runtime sharing is read-only; writes remain available only through the existing standalone sampling path or after Cortex-Debug has paused.

@@ -16,7 +16,8 @@ const {
     buildActiveReadPlan,
     nextLivePanelId,
     selectFocusedPanel,
-    selectPausedDebugReadSession
+    selectPausedDebugReadSession,
+    filterRuntimeRamPlan
 } = require("../src/services/liveWatchService");
 const { AgentOrchestrator } = require("../src/services/agentOrchestrator");
 
@@ -407,6 +408,27 @@ const { AgentOrchestrator } = require("../src/services/agentOrchestrator");
             }),
             [{ name: "counter", address: 0x20000000, size: 2 }],
             "closing the wider consumer should immediately shrink the merged plan"
+        );
+        const runtimeRam = filterRuntimeRamPlan(
+            [
+                { name: "data", address: 0x20000000, size: 4 },
+                { name: "boundary", address: 0x2000000c, size: 4 },
+                { name: "cross", address: 0x2000000e, size: 4 },
+                { name: "flash", address: 0x08000000, size: 4 },
+                { name: "overflow", address: 0xffffffff, size: 2 }
+            ],
+            [
+                { name: ".data", addr: 0x20000000, size: 0x10, flags: 3 },
+                { name: ".text", addr: 0x08000000, size: 0x100, flags: 2 }
+            ]
+        );
+        assert.deepStrictEqual(
+            runtimeRam.allowed.map((item) => item.name),
+            ["data", "boundary"]
+        );
+        assert.deepStrictEqual(
+            runtimeRam.denied.map((item) => item.name),
+            ["cross", "flash", "overflow"]
         );
 
         const active = new Set();

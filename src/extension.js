@@ -44,7 +44,7 @@ function activate(context) {
         },
         vscode.debug.registerDebugConfigurationProvider("cortex-debug", {
             async resolveDebugConfiguration(folder, config) {
-                await provider.prepareForCortexDebug(folder);
+                await provider.prepareForCortexDebug(folder, config);
                 return config;
             }
         }),
@@ -52,6 +52,7 @@ function activate(context) {
             createDebugAdapterTracker(session) {
                 provider.handleDebugSessionStart(session);
                 return {
+                    onWillReceiveMessage: message => provider.handleDebugAdapterRequest(session, message),
                     onDidSendMessage: message => provider.handleDebugAdapterMessage(session, message),
                     onError: error => console.error("Cortex-Debug adapter error:", error),
                     onExit: () => {}
