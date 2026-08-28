@@ -6,7 +6,7 @@ const os = require("os");
 const path = require("path");
 const { siblingNm, resolveCortexToolchain } = require("../src/services/cortexToolchainService");
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-cortex-tools-"));
+const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-cortex-tools-")));
 try {
     const touch = name => {
         const file = path.join(root, name);
