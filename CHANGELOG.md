@@ -6,6 +6,10 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+### Fixed
+
+- OpenOCD 测试假件的连接增加 error 处理，避免拆除连接时的 `ECONNRESET` 在 macOS/Windows 上崩溃测试进程。
+
 ## [0.7.2] - 2026-08-28
 
 ### Added
