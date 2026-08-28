@@ -6,6 +6,20 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-08-28
+
+### Added
+
+- 实时变量观测支持在 EmberProbe 托管的 Cortex-Debug 运行态下共享 OpenOCD 只读采样：调试运行中即可观察 ELF 可写 RAM 段内的变量，无需停止调试；侧边栏显示共享连接与运行态采样状态，共享 Tcl 读取不可用时自动降级为暂停后经 DAP 读取。
+
+### Changed
+
+- Cortex-Debug 运行态共享读取增加安全边界：仅允许完全位于 ELF 可写 RAM 段内的变量，超出每周期安全预算（4096 字节 / 32 次读取）时明确报错；`mcu-var-write` 在运行态下拒绝写入，运行时共享保持只读。
+
+### Fixed
+
+- Cortex 工具链测试统一比较规范化真实路径，兼容 macOS 将 `/var` 映射为 `/private/var`，修复 CI 在 macos-latest 上的失败。
+
 ## [0.7.1] - 2026-08-27
 
 ### Added
