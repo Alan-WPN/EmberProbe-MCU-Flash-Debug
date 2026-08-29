@@ -26,13 +26,14 @@ const { pipeline } = require("stream/promises");
 const fsp = fs.promises;
 
 // fs.promises 没有裸 fd 的 fdatasync；用回调版包装，并通过自有对象引用，
-// 使测试可以观测/注入 fdatasync 与 rename。
+// 使测试可以观测/注入 fdatasync、rename 与 writeFd（写队列慢磁盘/EIO 注入点）。
 const io = {
     fdatasync: (fd) =>
         new Promise((resolve, reject) => {
             fs.fdatasync(fd, (error) => (error ? reject(error) : resolve()));
         }),
-    rename: (from, to) => fsp.rename(from, to)
+    rename: (from, to) => fsp.rename(from, to),
+    writeFd: (fd, buffer) => writeFd(fd, buffer)
 };
 
 const FORMAT_VERSION = 1;
@@ -40,6 +41,11 @@ const MANIFEST_FILE = "manifest.json";
 const SEGMENT_MAX_AGE_MS = 5 * 60 * 1000;
 const SEGMENT_MAX_BYTES = 32 * 1024 * 1024;
 const SYNC_INTERVAL_MS = 1000;
+// 有界写队列水位：默认高水位 8 MiB（编排层暂停采样）、硬上限 16 MiB（拒绝新样本）、
+// 低水位 4 MiB（排空到该值以下视为恢复并向 NDJSON 写内部恢复事件）。
+const WRITE_QUEUE_HIGH_WATERMARK_BYTES = 8 * 1024 * 1024;
+const WRITE_QUEUE_HARD_MAX_BYTES = 16 * 1024 * 1024;
+const WRITE_QUEUE_LOW_WATERMARK_BYTES = 4 * 1024 * 1024;
 const MAX_MIB_LIMITS = { min: 64, max: 102400, fallback: 1024 };
 const GLOBAL_MAX_MIB_LIMITS = { min: 128, max: 204800, fallback: 2048 };
 const QUOTA_LOCK_FILE = "quota.lock";
@@ -124,7 +130,7 @@ async function atomicWriteFile(dir, name, buffer) {
     try {
         const fd = await openFd(tmpPath, "w");
         try {
-            await writeFd(fd, buffer);
+            await io.writeFd(fd, buffer);
             await io.fdatasync(fd);
         } finally {
             await closeFd(fd);
@@ -180,7 +186,11 @@ class RecordingSession {
         segmentMaxAgeMs = SEGMENT_MAX_AGE_MS,
         syncIntervalMs = SYNC_INTERVAL_MS,
         quota = null,
-        onQuotaExceeded = null
+        onQuotaExceeded = null,
+        onWriteError = null,
+        writeQueueHighWatermarkBytes = WRITE_QUEUE_HIGH_WATERMARK_BYTES,
+        writeQueueHardMaxBytes = WRITE_QUEUE_HARD_MAX_BYTES,
+        writeQueueLowWatermarkBytes = WRITE_QUEUE_LOW_WATERMARK_BYTES
     }) {
         this.sessionDir = sessionDir;
         this.manifest = manifest;
@@ -190,12 +200,39 @@ class RecordingSession {
         this.syncIntervalMs = syncIntervalMs;
         this.quota = quota;
         this.onQuotaExceeded = onQuotaExceeded;
+        this.onWriteError = onWriteError;
+        this.writeQueueHighWatermarkBytes = writeQueueHighWatermarkBytes;
+        this.writeQueueHardMaxBytes = writeQueueHardMaxBytes;
+        this.writeQueueLowWatermarkBytes = writeQueueLowWatermarkBytes;
         // 配额拒绝后的安全停止原因；null 表示未停止（未注入 quota 时永远为 null）。
         this.quotaStopReason = null;
+        // 写失败（ENOSPC/EIO 等）后的安全停止原因；null 表示写入通道正常。
+        this.writeFailedReason = null;
         this.active = null;
         this.closed = false;
         this._dirty = false;
         this._syncTimer = null;
+        // 有界写队列：appendSampleLine 入队并尽快异步排空；条目携带 ticket 用于
+        // "我的行是否已落盘"等待。样本行 seq 记入 manifest.sequenceCounter，
+        // 内部事件行（kind:"recording-event"）不占样本序号。
+        this._queue = [];
+        this._pendingBytes = 0;
+        this._enqueueTicket = 0;
+        this._writtenTicket = 0;
+        this._writtenSeq = 0;
+        this._drainTask = null;
+        this._drainPending = false;
+        this._backpressureActive = false;
+        this._backpressureSinceMs = null;
+        // 段状态变更（轮换封存/开新段）的串行化锁，避免并发追加时双重封存。
+        this._segmentLock = Promise.resolve();
+    }
+
+    /** 背压状态："none" | "high"（≥ 高水位，编排层应暂停采样）| "full"（≥ 硬上限，拒绝新样本）。 */
+    get backpressure() {
+        if (this._pendingBytes >= this.writeQueueHardMaxBytes) return "full";
+        if (this._pendingBytes >= this.writeQueueHighWatermarkBytes) return "high";
+        return "none";
     }
 
     /** 活动段 .part 文件绝对路径；无活动段时为 null。 */
@@ -294,6 +331,8 @@ class RecordingSession {
             }
             throw error;
         }
+        // 段可用后拉起排空器：处理轮换/配额窗口期间滞留队列中的内部事件行。
+        if (this._queue.length > 0) this._kickDrainer();
         return true;
     }
 
@@ -320,9 +359,11 @@ class RecordingSession {
     }
 
     /**
-     * 追加一条采样行。自动分配递增序号，写入活动段并合并 1 秒批量同步。
-     * 配额拒绝时安全停止：返回 written:false 的占位结果且不抛出异常，
-     * 已写入的数据原样保留。
+     * 追加一条采样行。自动分配递增序号并入有界写队列，由单个后台排空任务尽快写入
+     * 活动段；队列在进入时为空时等待本行真正落盘后返回（保持串行调用下的即时可见性），
+     * 队列积压时立即返回以允许积压（编排层通过 backpressure 暂停喂入）。
+     * 配额拒绝或写失败时安全返回 written:false 占位结果且不抛出异常，
+     * 已入队的数据原样保留。
      * @param {{source?: string, full?: boolean, timestampMs?: number, elapsedMs?: number, values?: Array}} sample
      *   values 为固定列的 valueText 数组（按 fixedVariables 顺序），缺失值传 null。
      * @returns {Promise<{seq: number, line: string, written: boolean}>}
@@ -330,22 +371,220 @@ class RecordingSession {
     async appendSampleLine(sample) {
         this._ensureOpen();
         if (this.quotaStopReason) return this._appendRejected();
-        await this._rotateIfDue();
-        // 轮换中的封存可能因配额拒绝而转入安全停止。
+        if (this.writeFailedReason) return this._appendRejected();
+        // 队列达到硬上限：拒绝新样本（不丢弃已入队样本），编排层据此暂停采样。
+        if (this._pendingBytes >= this.writeQueueHardMaxBytes) {
+            this._markBackpressureActive();
+            return this._appendRejected();
+        }
+        await this._ensureReadyForAppend();
+        if (this.closed) return this._appendRejected();
         if (this.quotaStopReason) return this._appendRejected();
-        if (!this.active) {
-            const opened = await this._openNewSegment();
-            if (!opened) return this._appendRejected();
+        if (!this.active) return this._appendRejected();
+        // 入队点的硬上限复查：并发/连续 fire-and-forget 调用间的真实积压以此时为准。
+        if (this._pendingBytes >= this.writeQueueHardMaxBytes) {
+            this._markBackpressureActive();
+            return this._appendRejected();
         }
         const seq = this.manifest.sequenceCounter + 1;
         const line = this._buildLine(sample, seq);
         const buffer = Buffer.from(line, "utf8");
-        await writeFd(this.active.fd, buffer);
+        const ticket = ++this._enqueueTicket;
+        const queueWasEmpty = this._queue.length === 0;
+        this._enqueueLine(buffer, seq, ticket);
         this.manifest.sequenceCounter = seq;
         this.active.samples += 1;
         this.active.bytes += buffer.length;
         this._markDirty();
+        this._markBackpressureActive();
+        this._kickDrainer();
+        if (queueWasEmpty) {
+            // 队列原本为空：等待本行落盘，保证串行调用后数据立即可见。
+            await this._waitForTicket(ticket);
+            if (this._writtenTicket < ticket) return { seq, line, written: false };
+        }
         return { seq, line, written: true };
+    }
+
+    /**
+     * 追加一条内部事件行（kind:"recording-event"），不占用样本序号、不计入行数统计。
+     * 用于断连 gap-start/gap-end 与写队列恢复等内部状态事件；导出侧按 kind 过滤。
+     * 等待事件行落盘后返回，保证事件与相邻样本行的先后顺序。
+     * @param {string} event 事件名（如 "gap-start" / "gap-end" / "backpressure-resume"）
+     * @param {object} [extra] 额外字段（如 gap 时长）
+     * @returns {Promise<{written: boolean}>}
+     */
+    async appendEventLine(event, extra = {}) {
+        this._ensureOpen();
+        if (this.quotaStopReason || this.writeFailedReason) return { written: false };
+        const payload = { kind: "recording-event", event, ts: this.clock.now(), ...extra };
+        const buffer = Buffer.from(JSON.stringify(payload) + "\n", "utf8");
+        const ticket = ++this._enqueueTicket;
+        this._enqueueLine(buffer, null, ticket);
+        if (this.active) this.active.bytes += buffer.length;
+        this._markDirty();
+        this._kickDrainer();
+        await this._waitForTicket(ticket);
+        return { written: this._writtenTicket >= ticket };
+    }
+
+    /** 入队一条原始行（样本或内部事件），更新待写字节计数。 */
+    _enqueueLine(buffer, seq, ticket) {
+        this._queue.push({ buffer, seq, ticket });
+        this._pendingBytes += buffer.length;
+    }
+
+    /** 待写字节进入高水位及以上时标记背压激活（恢复时用于写内部事件）。 */
+    _markBackpressureActive() {
+        if (this._backpressureActive) return;
+        if (this._pendingBytes < this.writeQueueHighWatermarkBytes) return;
+        this._backpressureActive = true;
+        this._backpressureSinceMs = this.clock.now();
+    }
+
+    /**
+     * 准备可写的活动段：必要时按大小/时间轮换封存并打开新段。
+     * 段状态变更在独立锁内串行化，避免并发追加导致的双重封存/双重开段。
+     */
+    async _ensureReadyForAppend() {
+        await this._withSegmentLock(async () => {
+            if (this.closed || this.quotaStopReason) return;
+            if (this.active) await this._rotateIfDue();
+            if (!this.active && !this.quotaStopReason) await this._openNewSegment();
+        });
+    }
+
+    /** 段状态变更锁：串行化执行，单个任务失败不中断后续排队任务。 */
+    _withSegmentLock(action) {
+        const run = this._segmentLock.then(action);
+        this._segmentLock = run.catch(() => {});
+        return run;
+    }
+
+    /** 等待指定 ticket 的行落盘；写失败/会话关闭/排空器停止时提前返回。 */
+    async _waitForTicket(ticket) {
+        for (;;) {
+            if (this._writtenTicket >= ticket) return true;
+            if (this.closed || this.writeFailedReason) return false;
+            if (!this._drainTask) return false;
+            await this._drainTask;
+        }
+    }
+
+    /** 启动后台排空任务（单飞）；任务期间新入队的数据由循环继续处理。 */
+    _kickDrainer() {
+        if (this._drainTask) {
+            this._drainPending = true;
+            return;
+        }
+        this._drainTask = this._drainLoop()
+            .catch((error) => this.recordError("drain-crashed", error))
+            .finally(() => {
+                this._drainTask = null;
+                // 排空器退出与最后一次 kick 之间存在窗口：退出后若仍有积压则重新拉起。
+                if (this._drainPending) {
+                    this._drainPending = false;
+                    if (this._queue.length > 0 && !this.writeFailedReason && this.active && !this.closed) {
+                        this._kickDrainer();
+                    }
+                }
+            });
+    }
+
+    /** 排空循环：批量取出待写行合并为单次写入；写失败时原样放回队列并转入安全停止。 */
+    async _drainLoop() {
+        for (;;) {
+            if (this._queue.length === 0) return;
+            if (!this.active) return; // 段不可用（轮换/配额停止窗口）：数据保留，等待下次拉起
+            if (this.writeFailedReason) return;
+            if (this.closed) return;
+            const batch = this._queue.splice(0, this._queue.length);
+            const bytes = batch.length === 1 ? batch[0].buffer : Buffer.concat(batch.map((entry) => entry.buffer));
+            let maxSeq = this._writtenSeq;
+            let maxTicket = this._writtenTicket;
+            for (const entry of batch) {
+                if (entry.seq != null && entry.seq > maxSeq) maxSeq = entry.seq;
+                if (entry.ticket > maxTicket) maxTicket = entry.ticket;
+            }
+            try {
+                await io.writeFd(this.active.fd, bytes);
+            } catch (error) {
+                // 写失败：数据原样放回队首（绝不静默丢弃），转入安全结束路径。
+                this._queue = batch.concat(this._queue);
+                this._handleWriteError(error);
+                return;
+            }
+            this._writtenSeq = maxSeq;
+            this._writtenTicket = maxTicket;
+            this._pendingBytes -= bytes.length;
+            if (this._pendingBytes < 0) this._pendingBytes = 0;
+            this._maybeResumeFromBackpressure();
+        }
+    }
+
+    /** 排空到低水位以下：解除背压并按需向 NDJSON 写一条内部恢复事件。 */
+    _maybeResumeFromBackpressure() {
+        if (!this._backpressureActive) return;
+        if (this._pendingBytes >= this.writeQueueLowWatermarkBytes) return;
+        this._backpressureActive = false;
+        const pausedMs =
+            this._backpressureSinceMs == null ? 0 : Math.max(0, this.clock.now() - this._backpressureSinceMs);
+        this._backpressureSinceMs = null;
+        if (this.quotaStopReason || this.writeFailedReason || this.closed) return;
+        const payload = { kind: "recording-event", event: "backpressure-resume", ts: this.clock.now(), pausedMs };
+        const buffer = Buffer.from(JSON.stringify(payload) + "\n", "utf8");
+        this._enqueueLine(buffer, null, ++this._enqueueTicket);
+        if (this.active) this.active.bytes += buffer.length;
+        this._kickDrainer();
+    }
+
+    /** 写失败（ENOSPC/EIO 等）的统一处理：记录、持久化错误日志并通知 onWriteError。 */
+    _handleWriteError(error) {
+        if (this.writeFailedReason) return;
+        this.writeFailedReason = (error && error.code) || "write-failed";
+        this.recordError("write-failed", error);
+        // 尽力把错误日志持久化到 manifest（失败时内存态已记录，由后续写盘兜底）。
+        void writeManifest(this.sessionDir, this.manifest).catch(() => {});
+        if (typeof this.onWriteError === "function") {
+            try {
+                this.onWriteError(error);
+            } catch {
+                // 回调异常不外泄，写入路径保持安全。
+            }
+        }
+    }
+
+    /**
+     * 最终排空尝试（close 前调用）：绕过写失败闸门，把队列中剩余数据一次性尽力写入
+     * 当前活动段；仍失败时显式记录丢失数量后清空队列（绝不静默丢弃）。
+     */
+    async _finalDrainAttempt() {
+        if (this._queue.length === 0) return;
+        const batch = this._queue.splice(0, this._queue.length);
+        const bytes = batch.length === 1 ? batch[0].buffer : Buffer.concat(batch.map((entry) => entry.buffer));
+        const lostLines = batch.length;
+        const lostBytes = bytes.length;
+        const highestSeq = batch.reduce((max, entry) => (entry.seq != null && entry.seq > max ? entry.seq : max), 0);
+        const highestTicket = batch.reduce(
+            (max, entry) => (entry.ticket > max ? entry.ticket : max),
+            this._writtenTicket
+        );
+        try {
+            if (!this.active) throw new Error("no active segment to drain into");
+            await io.writeFd(this.active.fd, bytes);
+            this._writtenTicket = Math.max(this._writtenTicket, highestTicket);
+            this._writtenSeq = Math.max(this._writtenSeq, highestSeq);
+            this._pendingBytes = Math.max(0, this._pendingBytes - bytes.length);
+            this.writeFailedReason = null; // 最终重试成功：解除写失败闩锁
+        } catch (error) {
+            this.recordError(
+                "queue-bytes-lost",
+                new Error(
+                    `${lostLines} queued lines / ${lostBytes} bytes could not be written before close: ${error && error.message}`
+                )
+            );
+            this._pendingBytes = Math.max(0, this._pendingBytes - bytes.length);
+        }
     }
 
     /** 批量追加采样行。 */
@@ -371,12 +610,25 @@ class RecordingSession {
         return this.flush();
     }
 
-    /** 强制一次最终同步（取消挂起的批量定时器并立即落盘）。 */
+    /** 等待写队列排空（受写失败闸门约束：写失败后不再自动重试，由 close 兜底）。 */
+    async _drainAll() {
+        while (this._queue.length > 0) {
+            if (this.writeFailedReason) return;
+            if (!this._drainTask) {
+                if (!this.active || this.closed) return;
+                this._kickDrainer();
+            }
+            await this._drainTask;
+        }
+    }
+
+    /** 强制一次最终同步（排空写队列、取消挂起的批量定时器并立即落盘）。 */
     async flush() {
         if (this._syncTimer) {
             this.clock.clearTimeout(this._syncTimer);
             this._syncTimer = null;
         }
+        await this._drainAll();
         if (!this.active) {
             this._dirty = false;
             return false;
@@ -495,7 +747,8 @@ class RecordingSession {
 
     /**
      * 关闭会话。"completed" 会封存活动段；其他状态（如 "interrupted"）保留 .part
-     * 以便后续 openSession/recoverSession 续录。始终先强制最终同步。
+     * 以便后续 openSession/recoverSession 续录。始终先做一次最终排空尝试
+     * （尽力写完队列剩余数据）并强制最终同步。
      */
     async close({ status = "completed" } = {}) {
         if (this.closed) return;
@@ -504,6 +757,8 @@ class RecordingSession {
             this._syncTimer = null;
         }
         try {
+            // 最终排空：尽力写完写队列中剩余的行；写失败时显式记录丢失数量。
+            await this._finalDrainAttempt();
             if (this.active) {
                 await this.flush();
                 if (status === "completed") {
@@ -573,9 +828,14 @@ class RecordingSession {
  * @param {object} [options.quota] 可注入的配额管理器（createQuotaManager 返回值）；省略时不限配额
  * @param {Function} [options.onQuotaExceeded] 配额拒绝回调 (reason, result) => Promise|void，
  *   供上层把会话置为 "stopped-quota" 等安全停止状态
+ * @param {Function} [options.onWriteError] 写失败回调 (error) => void，
+ *   供上层把会话置为 "stopped-error" 等安全停止状态
  * @param {number} [options.segmentMaxBytes] 测试用覆盖，默认 32 MiB
  * @param {number} [options.segmentMaxAgeMs] 测试用覆盖，默认 5 分钟
  * @param {number} [options.syncIntervalMs] 测试用覆盖，默认 1000
+ * @param {number} [options.writeQueueHighWatermarkBytes] 测试用覆盖，默认 8 MiB
+ * @param {number} [options.writeQueueHardMaxBytes] 测试用覆盖，默认 16 MiB
+ * @param {number} [options.writeQueueLowWatermarkBytes] 测试用覆盖，默认 4 MiB
  * @returns {Promise<RecordingSession>}
  */
 async function createSession(options = {}) {
@@ -618,7 +878,11 @@ async function createSession(options = {}) {
         segmentMaxAgeMs: options.segmentMaxAgeMs,
         syncIntervalMs: options.syncIntervalMs,
         quota: options.quota || null,
-        onQuotaExceeded: options.onQuotaExceeded || null
+        onQuotaExceeded: options.onQuotaExceeded || null,
+        onWriteError: options.onWriteError || null,
+        writeQueueHighWatermarkBytes: options.writeQueueHighWatermarkBytes,
+        writeQueueHardMaxBytes: options.writeQueueHardMaxBytes,
+        writeQueueLowWatermarkBytes: options.writeQueueLowWatermarkBytes
     });
     await session._openNewSegment();
     return session;
@@ -788,7 +1052,11 @@ async function openSession(options = {}) {
         segmentMaxAgeMs: options.segmentMaxAgeMs,
         syncIntervalMs: options.syncIntervalMs,
         quota: options.quota || null,
-        onQuotaExceeded: options.onQuotaExceeded || null
+        onQuotaExceeded: options.onQuotaExceeded || null,
+        onWriteError: options.onWriteError || null,
+        writeQueueHighWatermarkBytes: options.writeQueueHighWatermarkBytes,
+        writeQueueHardMaxBytes: options.writeQueueHardMaxBytes,
+        writeQueueLowWatermarkBytes: options.writeQueueLowWatermarkBytes
     });
     if (report.manifest.activeSegment) {
         const file = report.manifest.activeSegment.file;
@@ -1160,6 +1428,9 @@ module.exports = {
     SEGMENT_MAX_AGE_MS,
     SEGMENT_MAX_BYTES,
     SYNC_INTERVAL_MS,
+    WRITE_QUEUE_HIGH_WATERMARK_BYTES,
+    WRITE_QUEUE_HARD_MAX_BYTES,
+    WRITE_QUEUE_LOW_WATERMARK_BYTES,
     QUOTA_LOCK_FILE,
     QUOTA_LOCK_STALE_MS,
     RecordingSession,
