@@ -8,10 +8,12 @@
 
 const assert = require("assert");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const recordingUi = require("../src/services/recordingUi");
 const { createRecordingAgentHandlers, metadataSnapshot } = require("../src/services/recordingAgent");
+const { createRecordingService } = require("../src/services/recordingService");
 const liveWatchView = require("../src/liveWatchView");
 const zh = require("../src/i18n/zh.js");
 const en = require("../src/i18n/en.js");
@@ -46,7 +48,8 @@ const root = path.resolve(__dirname, "..");
         bytes: 12.3 * 1024 * 1024,
         rows: 45200,
         gaps: 2,
-        retry: { attempt: 1, nextAtMs: null },
+        // 真实契约：recordingService.list() 的条目字段名为 retries（_snapshotFromManifest）
+        retries: { attempt: 1, nextAtMs: null },
         quota: { usedBytes: 12.3 * 1024 * 1024, maxMiB: 1024 }
     });
     assert.ok(item.label.startsWith("▶ "), "label starts with the status icon");
@@ -66,6 +69,40 @@ const root = path.resolve(__dirname, "..");
     });
     assert.strictEqual(quietItem.description, "", "clean sessions have an empty summary");
     assert.ok(!JSON.stringify(item).includes("valueText"), "session items never carry sample bodies");
+
+    // 真实 list() 输出契约（临时存储 + 真实 recordingService）：retries 摘要必须出现在 description
+    {
+        const storageRoot = fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-recording-ui-list-"));
+        try {
+            const service = createRecordingService({
+                context: {
+                    globalStorageUri: { fsPath: storageRoot },
+                    storageUri: { fsPath: path.join(storageRoot, "workspace-identity") }
+                },
+                resolveVariables: async (names) =>
+                    names.map((name) => ({ name, type: "u32", address: "0x20000000", size: 4 })),
+                elfInfo: async () => ({ sha256: "cd".repeat(32), mtimeMs: 111 }),
+                hardwareInfo: async () => ({ mcu: "STM32F407VG", probe: "probe-ui-test" }),
+                getSamplingInterval: () => 100,
+                limits: { maxMiB: 64, globalMaxMiB: 128 }
+            });
+            const started = await service.start({ names: ["temp"] });
+            assert.strictEqual(started.recordingActive, true);
+            await service.noteRetryScheduled({ attempt: 3, nextAtMs: 12345 });
+            const sessions = await service.list();
+            const active = sessions.find((entry) => entry.recordingId === started.recordingId);
+            assert.ok(active, "list() must return the active session");
+            assert.ok(active.retries && active.retries.attempt === 3, "list() exposes retry state under `retries`");
+            const listItem = recordingUi.sessionQuickPickItem(active);
+            assert.ok(
+                listItem.description.includes("retry:3"),
+                "QuickPick description must surface the retry summary from the real list() contract"
+            );
+            await service.stop();
+        } finally {
+            fs.rmSync(storageRoot, { recursive: true, force: true });
+        }
+    }
 
     // QuickPick 二级菜单的状态过滤：活动会话不出现"导出并删除"、出现"停止"；停止会话相反
     assert.deepStrictEqual(recordingUi.actionsForSession({ status: "recording" }), {
@@ -457,6 +494,37 @@ const root = path.resolve(__dirname, "..");
         providerSource.includes("_recordingExportGuard.begin(recordingId)"),
         "UI exports must take the shared concurrent-export guard"
     );
+    // 所有不经 _postConsumerStatuses 的 liveStatus 广播也必须携带录制快照：
+    // 否则无 recording 字段的消息到达波形面板时，录制工具栏会被（正确地）保留而非刷新，
+    // 面板打开（ready→_syncGraphTarget）期间的工具栏状态将一直是模板默认值。
+    const methodStart = (signature) => providerSource.indexOf("\n" + signature);
+    const syncGraphBlock = providerSource.slice(
+        methodStart("    _syncGraphTarget(entry) {"),
+        methodStart("    _syncSidebarTarget(post) {")
+    );
+    const syncSidebarBlock = providerSource.slice(
+        methodStart("    _syncSidebarTarget(post) {"),
+        methodStart("    _activeReadPlan() {")
+    );
+    const postConsumerBlock = providerSource.slice(
+        methodStart("    _postConsumerStatuses(payload, error = false) {"),
+        methodStart("    _scalarWatchList(key) {")
+    );
+    assert.ok(syncGraphBlock && syncSidebarBlock && postConsumerBlock, "contract slices must be non-empty");
+    for (const [name, block] of [
+        ["_syncGraphTarget", syncGraphBlock],
+        ["_syncSidebarTarget", syncSidebarBlock],
+        ["_postConsumerStatuses", postConsumerBlock]
+    ]) {
+        assert.ok(
+            block.includes("recording: this._recordingStatusSnapshot()"),
+            `${name} broadcast must attach the recording snapshot`
+        );
+    }
+    assert.ok(
+        providerSource.includes("agentOwned: running, recording: this._recordingStatusSnapshot()"),
+        "_postAgentSampling broadcasts must attach the recording snapshot (agent sampling does not change recording state)"
+    );
 
     // ------------------------------------------------ 波形 UI（模板 + renderer）契约
     const panelZh = liveWatchView.getLiveWatchContent({ maxSamples: 100, intervalMs: 20 }, "zh");
@@ -473,8 +541,12 @@ const root = path.resolve(__dirname, "..");
         assert.ok(rendererSource.includes(`type:'${type}'`), `renderer must post ${type}`);
     }
     assert.ok(
-        rendererSource.includes("updateRecording(m.recording)"),
-        "renderer must derive the badge from liveStatus.recording"
+        rendererSource.includes("m.type==='liveStatus'&&m.recording!==undefined)updateRecording(m.recording)"),
+        "renderer must only update the recording toolbar when liveStatus explicitly carries a recording field"
+    );
+    assert.ok(
+        !rendererSource.includes("'liveStatus')updateRecording("),
+        "unconditional liveStatus recording updates would reset the toolbar on broadcasts without the field"
     );
     assert.ok(
         rendererSource.includes("recActive?t('lw.recStop'):t('lw.recStart')"),

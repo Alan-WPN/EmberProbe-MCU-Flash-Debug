@@ -871,7 +871,8 @@ class MainViewProvider {
     }
     _postAgentSampling(running, key, params) {
         this._agentSamplingStatus = running ? { running, key, params, agentOwned: true } : null;
-        this._postLive({ type: 'liveStatus', running, key, params, agentOwned: running });
+        // Agent 临时采样不改变录制状态：附带当前录制快照，避免波形工具栏状态丢失
+        this._postLive({ type: 'liveStatus', running, key, params, agentOwned: running, recording: this._recordingStatusSnapshot() });
     }
     _waitAgentInterval(intervalMs) {
         return new Promise(resolve => {
@@ -1629,6 +1630,7 @@ class MainViewProvider {
         if (!entry || !entry.ready) return;
         const post = entry.post;
         post({ type: 'watchList', items: this._scalarWatchList(entry.watchKey) });
+        // 面板打开/配置变更时同步录制快照，保证工具栏状态即时正确（liveStatus 统一带 recording）
         post({ type: 'liveStatus', ...(this._agentSamplingStatus || {
             running: this._samplingIntent,
             intentEnabled: this._samplingIntent,
@@ -1638,7 +1640,7 @@ class MainViewProvider {
             mode: this._debugBridge.hasSession ? this._debugBridge.status().mode : (this._liveWatchRunning ? 'standalone-sampling' : 'stopped'),
             source: this._debugBridge.hasSession ? 'dap' : (this._liveWatchRunning ? 'openocd' : 'none'),
             key: this._debugBridge.hasSession ? this._debugBridge.status().key : (this._liveWatchRunning ? 'sb.sampling' : 'sb.stopped')
-        }) });
+        }), recording: this._recordingStatusSnapshot() });
         if (entry.latestSamples.size) {
             const now = Date.now();
             const scalarSamples = [], compositeSamples = [];
@@ -1668,7 +1670,7 @@ class MainViewProvider {
             mode: this._debugBridge.hasSession ? this._debugBridge.status().mode : (this._liveWatchRunning ? 'standalone-sampling' : 'stopped'),
             source: this._debugBridge.hasSession ? 'dap' : (this._liveWatchRunning ? 'openocd' : 'none'),
             key: this._debugBridge.hasSession ? this._debugBridge.status().key : (this._liveWatchRunning ? 'sb.sampling' : 'sb.stopped')
-        }) });
+        }), recording: this._recordingStatusSnapshot() });
         if (this._latestSidebarSamples.size) {
             const now = Date.now();
             const scalarSamples = [];

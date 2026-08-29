@@ -119,7 +119,8 @@ function sessionQuickPickItem(snapshot) {
     const label = `${statusIcon(status)} ${formatSessionTime(snap.createdAtMs)} · ${formatBytes(snap.bytes)} · ${formatCount(snap.rows)}`;
     const parts = [];
     if (Number.isFinite(Number(snap.gaps)) && Number(snap.gaps) > 0) parts.push(`gaps:${Number(snap.gaps)}`);
-    const retry = snap.retry;
+    // recordingService.list() 的条目字段名为 retries（_snapshotFromManifest 契约）
+    const retry = snap.retries;
     if (retry && Number.isFinite(Number(retry.attempt)) && Number(retry.attempt) > 0) {
         parts.push(`retry:${Number(retry.attempt)}`);
     }
