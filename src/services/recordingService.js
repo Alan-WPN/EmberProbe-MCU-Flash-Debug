@@ -42,6 +42,9 @@ function codedError(code, message) {
     return Object.assign(new Error(message), { code });
 }
 
+/** 录制 ID 合法性规则（delete/导出/清理等路径敏感操作共用，拒绝 ..、路径分隔符等）。 */
+const RECORDING_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
 /**
  * 录制 manifest 的松散类型（字段以 recordingStorage.js 实际写入为准）。
  * @typedef {object} RecordingManifest
@@ -154,6 +157,27 @@ class RecordingService {
     /** 等待构造时启动的恢复流程完成（返回恢复结果快照；测试与接线方可用）。 */
     whenReady() {
         return this._recoveryPromise.then(() => this.status());
+    }
+
+    /** 工作区身份路径（导出路径校验缺省用它；接线方可注入更准确的用户工作区根）。 */
+    get workspacePath() {
+        return this._workspacePath;
+    }
+
+    /**
+     * 在线导出用：封存当前活动段并立即开启新段（原子旋转），返回一致性截止点。
+     * 无活动会话、正在停止或安全收尾时返回 null（调用方按普通只读导出处理）；
+     * 旋转失败（封存错误）向上抛出——原段已回退、采样不丢失，错误已记 manifest。
+     * @returns {Promise<{cutoffMs: number}|null>} cutoffMs 为封口时刻（UTC ms）
+     */
+    async rotateActiveSegment() {
+        await this._recoveryPromise;
+        const session = this._session;
+        if (!session || this._stopping || this._finalizePromise || this._stopPromise) return null;
+        const result = await session.rotateSegment("export");
+        if (result.sealed) return { cutoffMs: result.sealed.sealedAtMs };
+        if (!result.hadActive) return { cutoffMs: this._clock.now() }; // 无活动段：以当前时刻为截止点
+        return null; // 封存被配额拒绝中止：会话转入安全停止，按普通只读导出处理
     }
 
     // ---------------------------------------------------------------- 采样喂入
@@ -391,7 +415,7 @@ class RecordingService {
         if (confirmed !== true) {
             throw codedError("CONFIRMATION_REQUIRED", "deletion requires explicit confirmation");
         }
-        if (typeof recordingId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(recordingId)) {
+        if (typeof recordingId !== "string" || !RECORDING_ID_PATTERN.test(recordingId)) {
             throw codedError("RECORDING_NOT_FOUND", `unknown recording id: ${recordingId}`);
         }
         if (this._recordingId && this._recordingId === recordingId && this._session) {
@@ -868,5 +892,6 @@ function createRecordingService(options) {
 
 module.exports = {
     createRecordingService,
-    RecordingService
+    RecordingService,
+    RECORDING_ID_PATTERN
 };

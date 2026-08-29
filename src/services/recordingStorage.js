@@ -708,13 +708,18 @@ class RecordingSession {
         }
         await fsp.unlink(segment.filePath);
         const stat = await fsp.stat(gzPath);
+        const sealedAtMs = this.clock.now();
         const entry = {
             name: segment.name,
             file: gzFile,
             samples: segment.samples,
             bytes: segment.bytes,
             compressedBytes: stat.size,
-            sealedAtMs: this.clock.now(),
+            sealedAtMs,
+            // 段时间边界（导出分段选择用）：startedAtMs 取段创建时刻（≤ 首行 ts，保守纳入），
+            // endedAtMs 取封口时刻（≥ 末行 ts，保守纳入）；恢复重建的段缺边界时由导出侧保守纳入。
+            startedAtMs: segment.createdAtMs != null ? segment.createdAtMs : null,
+            endedAtMs: sealedAtMs,
             reason
         };
         this.manifest.segments.push(entry);
@@ -730,6 +735,30 @@ class RecordingSession {
             }
         }
         return entry;
+    }
+
+    /**
+     * 原子段轮换（在线导出用）：在段状态锁内封存当前活动段并立即开启新段。
+     * 旋转期间到达的新样本被段状态锁与写队列暂存，新段就绪后才恢复写入（照常进入新段）；
+     * 封存失败时 sealActiveSegment 已回退原段（采样不丢失、错误记 manifest），错误向上抛出；
+     * 新段开启被配额拒绝时保留封存结果并返回 opened:false（会话转入安全停止路径）。
+     * @param {string} reason 封存原因（默认 "export"）
+     * @returns {Promise<{sealed: any, opened: boolean, hadActive: boolean}>}
+     *   sealed 为封存条目（含 sealedAtMs，可作一致性截止点）；无活动段时 sealed 为 null
+     */
+    async rotateSegment(reason = "export") {
+        const result = { sealed: null, opened: false, hadActive: false };
+        await this._withSegmentLock(async () => {
+            if (this.closed) return;
+            result.hadActive = Boolean(this.active);
+            if (!this.active) return;
+            const sealed = await this.sealActiveSegment(reason);
+            if (!sealed) return; // 配额拒绝中止封存：原段已回退，保持可写
+            result.sealed = sealed;
+            if (this.closed || this.quotaStopReason) return;
+            result.opened = await this._openNewSegment();
+        });
+        return result;
     }
 
     /** 记录一条错误日志到 manifest（最多保留最近 100 条）。 */

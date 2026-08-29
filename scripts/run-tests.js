@@ -49,6 +49,7 @@ const sourceFiles = [
     "src/services/agentOrchestrator.js",
     "src/services/recordingStorage.js",
     "src/services/recordingService.js",
+    "src/services/recordingExport.js",
     "src/services/recorderSampler.js",
     "src/i18n/index.js",
     "src/i18n/zh.js",
@@ -115,7 +116,8 @@ const allTests = [
     "test/recording-storage.test.js",
     "test/recording-quota.test.js",
     "test/recording-service.test.js",
-    "test/recording-sampling.test.js"
+    "test/recording-sampling.test.js",
+    "test/recording-export.test.js"
 ];
 
 // 发布元数据一致性检查只在发布流程运行，日常提交不做版本/README 声明校验。
@@ -139,7 +141,8 @@ const qualityTests = [
     "test/recording-storage.test.js",
     "test/recording-quota.test.js",
     "test/recording-service.test.js",
-    "test/recording-sampling.test.js"
+    "test/recording-sampling.test.js",
+    "test/recording-export.test.js"
 ];
 
 function run(args) {

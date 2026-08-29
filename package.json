@@ -135,7 +135,7 @@
         "emberprobe.maxSamples": {
           "type": "number",
           "default": 2000,
-          "description": "实时曲线每个通道保留的最大采样点数"
+          "description": "仅控制实时曲线显示的点数上限，实际有效范围 100–20000；长期录制数据不在此列，不受其影响"
         },
         "emberprobe.recordingMaxMiB": {
           "type": "number",
