@@ -79,7 +79,7 @@ function sessionDirFor(storageRoot, wsHash, recordingId) {
 }
 
 function nextRecordingId(nowMs = Date.now()) {
-    const stamp = new Date(nowMs).toISOString().replace(/[-:T]/g, "").slice(0, 15);
+    const stamp = new Date(nowMs).toISOString().replace(/[-:T.]/g, "").slice(0, 14);
     return `${stamp}-${crypto.randomBytes(2).toString("hex")}`;
 }
 
@@ -97,27 +97,34 @@ function closeFd(fd) {
 
 function writeFd(fd, buffer) {
     return new Promise((resolve, reject) => {
-        fs.write(fd, buffer, 0, buffer.length, (error) => (error ? reject(error) : resolve()));
+        fs.write(fd, buffer, 0, buffer.length, (error, written) => {
+            if (error) return reject(error);
+            if (written !== buffer.length) {
+                return reject(new Error(`short write: only ${written} of ${buffer.length} bytes written`));
+            }
+            resolve();
+        });
     });
 }
 
 /** 原子写文件：同目录临时文件 → fdatasync → rename 覆盖，失败时清理临时文件。 */
 async function atomicWriteFile(dir, name, buffer) {
     const tmpPath = path.join(dir, `${name}.tmp`);
-    const fd = await openFd(tmpPath, "w");
     try {
-        await writeFd(fd, buffer);
-        await io.fdatasync(fd);
-    } finally {
-        await closeFd(fd);
-    }
-    try {
+        const fd = await openFd(tmpPath, "w");
+        try {
+            await writeFd(fd, buffer);
+            await io.fdatasync(fd);
+        } finally {
+            await closeFd(fd);
+        }
         await io.rename(tmpPath, path.join(dir, name));
     } catch (error) {
+        // 任何一步失败都清理临时文件，且不掩盖原始错误。
         try {
             await fsp.unlink(tmpPath);
         } catch {
-            // 临时文件清理失败不掩盖原始错误。
+            // 临时文件不存在或已清理。
         }
         throw error;
     }
@@ -183,14 +190,41 @@ class RecordingSession {
         if (this.closed) throw new Error("recording session is closed");
     }
 
+    /** 下一个段序号：扫描 manifest 与磁盘上已有段文件取最大索引 + 1。 */
+    async _nextSegmentIndex() {
+        let maxIndex = 0;
+        for (const segment of Array.isArray(this.manifest.segments) ? this.manifest.segments : []) {
+            const match = segment && segment.name ? /^seg-(\d+)$/.exec(segment.name) : null;
+            if (match) maxIndex = Math.max(maxIndex, Number(match[1]));
+        }
+        for (const entry of await fsp.readdir(this.sessionDir)) {
+            const match = /^seg-(\d+)\.ndjson\.(?:part|gz)$/.exec(entry);
+            if (match) maxIndex = Math.max(maxIndex, Number(match[1]));
+        }
+        return maxIndex + 1;
+    }
+
     async _openNewSegment() {
-        const name = `seg-${String(this.manifest.segments.length + 1).padStart(6, "0")}`;
+        const name = `seg-${String(await this._nextSegmentIndex()).padStart(6, "0")}`;
         const file = `${name}.ndjson.part`;
         const filePath = path.join(this.sessionDir, file);
         const fd = await openFd(filePath, "a");
+        const previousActiveSegment = this.manifest.activeSegment;
         this.active = { name, file, filePath, fd, samples: 0, bytes: 0, createdAtMs: this.clock.now() };
         this.manifest.activeSegment = { name, file, createdAtMs: this.active.createdAtMs, samples: 0, bytes: 0 };
-        await writeManifest(this.sessionDir, this.manifest);
+        try {
+            await writeManifest(this.sessionDir, this.manifest);
+        } catch (error) {
+            // manifest 写入失败：关闭已打开的 fd 并回滚内存状态，避免句柄泄漏。
+            this.active = null;
+            this.manifest.activeSegment = previousActiveSegment;
+            try {
+                await closeFd(fd);
+            } catch {
+                // fd 关闭失败不掩盖原始错误。
+            }
+            throw error;
+        }
     }
 
     _buildLine(sample, seq) {
@@ -265,9 +299,13 @@ class RecordingSession {
             this.clock.clearTimeout(this._syncTimer);
             this._syncTimer = null;
         }
-        this._dirty = false;
-        if (!this.active) return false;
+        if (!this.active) {
+            this._dirty = false;
+            return false;
+        }
         await io.fdatasync(this.active.fd);
+        // 仅在同步成功后才清除脏标记，失败的数据保持可重试。
+        this._dirty = false;
         return true;
     }
 
@@ -301,9 +339,13 @@ class RecordingSession {
             } catch {
                 // 临时文件不存在或已清理。
             }
-            // 封存失败：恢复活动段，采样可以继续写入同一段。
-            segment.fd = await openFd(segment.filePath, "a");
-            this.active = segment;
+            // 封存失败：恢复活动段，采样可以继续写入同一段；重开失败不掩盖原始封存错误。
+            try {
+                segment.fd = await openFd(segment.filePath, "a");
+                this.active = segment;
+            } catch {
+                // 重开失败：保持活动段为空，由调用方走恢复流程。
+            }
             this.recordError("seal-failed", error);
             throw error;
         }
@@ -355,31 +397,46 @@ class RecordingSession {
      */
     async close({ status = "completed" } = {}) {
         if (this.closed) return;
-        this.closed = true;
         if (this._syncTimer) {
             this.clock.clearTimeout(this._syncTimer);
             this._syncTimer = null;
         }
-        if (this.active) {
-            await this.flush();
-            if (status === "completed") {
-                await this.sealActiveSegment("close");
-            } else {
-                const segment = this.active;
-                await closeFd(segment.fd);
-                this.active = null;
-                this.manifest.activeSegment = {
-                    name: segment.name,
-                    file: segment.file,
-                    createdAtMs: segment.createdAtMs,
-                    samples: segment.samples,
-                    bytes: segment.bytes
-                };
+        try {
+            if (this.active) {
+                await this.flush();
+                if (status === "completed") {
+                    await this.sealActiveSegment("close");
+                } else {
+                    const segment = this.active;
+                    await closeFd(segment.fd);
+                    this.active = null;
+                    this.manifest.activeSegment = {
+                        name: segment.name,
+                        file: segment.file,
+                        createdAtMs: segment.createdAtMs,
+                        samples: segment.samples,
+                        bytes: segment.bytes
+                    };
+                }
             }
+            this.manifest.status = status;
+            this.manifest.endedAtMs = this.clock.now();
+            await writeManifest(this.sessionDir, this.manifest);
+        } catch (error) {
+            // 仅在所有持久化成功后才标记关闭；失败时关闭活动 fd 防止泄漏，
+            // 保留 .part 与未关闭语义，调用方可以重试或走恢复流程。
+            if (this.active) {
+                try {
+                    await closeFd(this.active.fd);
+                } catch {
+                    // fd 关闭失败不掩盖原始错误。
+                }
+                this.active = null;
+            }
+            this.recordError("close-failed", error);
+            throw error;
         }
-        this.manifest.status = status;
-        this.manifest.endedAtMs = this.clock.now();
-        await writeManifest(this.sessionDir, this.manifest);
+        this.closed = true;
     }
 }
 
@@ -448,14 +505,17 @@ async function createSession(options = {}) {
 
 /**
  * 恢复一个可能中断的会话目录：
+ *   - 清理残留的 *.tmp 临时文件；
+ *   - 对已有封存 .gz 的同索引陈旧 .part（rename 成功但 unlink 前崩溃的窗口）只保留 .gz；
  *   - 截断 .part 中不完整的尾行（定位最后一个 \n 并在其后截断）；
  *   - 从存活行重算序号计数器；
- *   - 按磁盘文件重建段列表，原子写回修复后的 manifest（状态置为 "interrupted"）。
+ *   - 按磁盘文件重建段列表，原子写回修复后的 manifest（状态置为 "interrupted"）；
+ *   - 损坏/不可解析的 manifest.json 视同缺失，从磁盘重建。
  * @param {{sessionDir?: string, storageRoot?: string, workspacePath?: string, workspaceHash?: string,
  *          recordingId?: string, clock?: object}} options
  * @returns {Promise<{sessionDir: string, hadManifest: boolean, truncated: boolean, truncatedBytes: number,
- *          recoveredLines: number, sequenceCounter: number, partFiles: string[], segments: object[],
- *          manifest: object}>}
+ *          recoveredLines: number, sequenceCounter: number, partFiles: string[], staleParts: string[],
+ *          segments: object[], manifest: object}>}
  */
 async function recoverSession(options = {}) {
     const clock = options.clock || defaultClock;
@@ -464,7 +524,13 @@ async function recoverSession(options = {}) {
         const wsHash = options.workspaceHash || workspaceHash(options.workspacePath);
         sessionDir = sessionDirFor(options.storageRoot, wsHash, options.recordingId);
     }
-    const existing = await readManifest(sessionDir);
+    let existing = null;
+    try {
+        existing = await readManifest(sessionDir);
+    } catch {
+        // 损坏/不可解析的 manifest 视同缺失，从磁盘文件重建。
+        existing = null;
+    }
     const report = {
         sessionDir,
         hadManifest: Boolean(existing),
@@ -473,11 +539,37 @@ async function recoverSession(options = {}) {
         recoveredLines: 0,
         sequenceCounter: existing && Number.isInteger(existing.sequenceCounter) ? existing.sequenceCounter : 0,
         partFiles: [],
+        staleParts: [],
         segments: []
     };
     const entries = await fsp.readdir(sessionDir);
+    // 清理上次原子写入崩溃残留的临时文件。
+    for (const entry of entries.filter((name) => name.endsWith(".tmp"))) {
+        try {
+            await fsp.unlink(path.join(sessionDir, entry));
+        } catch {
+            // 清理失败不阻塞恢复。
+        }
+    }
     const gzFiles = entries.filter((entry) => entry.endsWith(".ndjson.gz")).sort();
-    const partFiles = entries.filter((entry) => entry.endsWith(".ndjson.part")).sort();
+    const sealedFiles = new Set(gzFiles);
+    const partFiles = [];
+    for (const entry of entries.filter((entry) => entry.endsWith(".ndjson.part")).sort()) {
+        // rename 成功但 .part 尚未删除的崩溃窗口：保留封存 .gz，删除陈旧 .part，
+        // 确保每个段索引至多一个数据源，且不把陈旧 .part 当作活动段。
+        const sealedSibling = `${entry.slice(0, -".ndjson.part".length)}.ndjson.gz`;
+        if (sealedFiles.has(sealedSibling)) {
+            try {
+                await fsp.unlink(path.join(sessionDir, entry));
+                report.staleParts.push(entry);
+            } catch {
+                // 删除失败时退回常规 .part 处理，避免数据丢失。
+                partFiles.push(entry);
+            }
+            continue;
+        }
+        partFiles.push(entry);
+    }
     const known = new Map();
     for (const segment of existing && Array.isArray(existing.segments) ? existing.segments : []) {
         if (segment && segment.file) known.set(segment.file, segment);
