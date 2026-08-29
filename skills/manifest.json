@@ -60,6 +60,12 @@
       "version": "1.0.0",
       "runtime": true,
       "required": ["SKILL.md", "scripts/debug.js", "agents/openai.yaml"]
+    },
+    {
+      "name": "mcu-recording",
+      "version": "1.0.0",
+      "runtime": true,
+      "required": ["SKILL.md", "scripts/record.js", "agents/openai.yaml"]
     }
   ]
 }

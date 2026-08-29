@@ -42,6 +42,9 @@ const { SvdPeripheralService } = require("./services/svdPeripheralService");
 const { DebugControlService } = require("./services/debugControlService");
 const { resolveCortexToolchainForWorkspace } = require("./services/cortexToolchainService");
 const { createRecordingService } = require("./services/recordingService");
+const { createRecordingExporter } = require("./services/recordingExport");
+const recordingUi = require("./services/recordingUi");
+const { createRecordingAgentHandlers } = require("./services/recordingAgent");
 const recorderSampler = require("./services/recorderSampler");
 const { externalizeWebviewHtml } = require("./webviewAssets");
 const fs = require("fs");
@@ -223,6 +226,25 @@ class MainViewProvider {
         });
         this._recordingService.onQuotaStop(() => this._handleRecordingSafeStop('quota'));
         this._recordingService.onSafeStop(() => this._handleRecordingSafeStop('error'));
+        // 长录制导出器（Task 4 服务 + Task 5 接线）：workspaceRootProvider 注入真实用户工作区根
+        // （Task 4 预留的注入缝），缺省路径校验器据此拒绝工作区外与符号链接逃逸的输出路径
+        this._recordingExporter = createRecordingExporter({
+            recordingService: this._recordingService,
+            storageRootProvider: () => path.join(this._context.globalStorageUri.fsPath, 'recordings'),
+            workspaceRootProvider: () => this._recordingWorkspaceRoot()
+        });
+        // 在线导出与最终导出共用的并发闸：同一会话进行中禁止第二次导出（并发同路径导出会损坏输出）
+        this._recordingExportGuard = recordingUi.createExportGuard();
+        // Agent Bridge 六处理器（Task 5）：只透传控制参数、返回元数据 JSON，绝不返回 CSV 正文
+        this._recordingAgentHandlers = createRecordingAgentHandlers({
+            startRecording: params => this._startRecording(params || {}),
+            stopRecording: () => this._stopRecording(),
+            statusSync: () => this._recordingService.status(),
+            list: () => this._recordingService.list(),
+            deleteRecording: (recordingId, opts) => this._recordingService.delete(recordingId, opts),
+            exporter: this._recordingExporter,
+            guard: this._recordingExportGuard
+        });
         // VS Code commands：供 Task 5 的 UI 与 Agent Bridge 复用（与 recording.* 消息分支同一实现）
         this._recordingCommands = [
             vscode.commands.registerCommand('emberprobe.recording.start', params => this._startRecording(params || {})),
@@ -317,7 +339,8 @@ class MainViewProvider {
                 'debug.start': () => this._debugControlService.start(),
                 'debug.control': params => this._debugControlService.control(params || {}),
                 'debug.breakpoints.list': () => this._debugControlService.listBreakpoints(),
-                'debug.breakpoints.update': params => this._debugControlService.updateBreakpoints(params || {})
+                'debug.breakpoints.update': params => this._debugControlService.updateBreakpoints(params || {}),
+                ...this._recordingAgentHandlers
             }
         });
         this.registerCommandHandlers();
@@ -1503,6 +1526,13 @@ class MainViewProvider {
                     case 'setInterval':
                         this._setLiveInterval(message.intervalMs);
                         break;
+                    case 'recordingStart':
+                    case 'recordingStop':
+                    case 'recordingExport':
+                    case 'recordingManage':
+                        // 波形工具栏录制入口（Task 5）：开始/停止/在线导出/录制管理
+                        await this._handleRecordingUiMessage(message, post, watchKey);
+                        break;
                     case 'exportCsv': {
                         if (!message.csv) break;
                         const stamp = new Date(), pad = (n) => String(n).padStart(2, '0');
@@ -2041,6 +2071,232 @@ class MainViewProvider {
     _handleRecordingSafeStop(kind) {
         this._handleRecordingEnded();
         this._postConsumerStatuses({ message: kind === 'quota' ? 'recording stopped: quota exceeded' : 'recording stopped: write error' }, true);
+    }
+
+    // ------------------------------------------------ 录制 UI（Task 5）
+
+    // 导出输出路径的工作区根：真实用户工作区（Task 4 预留的 workspaceRootProvider 注入缝）。
+    // 无打开的工作区时抛 EXPORT_PATH_INVALID，由导出结果统一回报。
+    _recordingWorkspaceRoot() {
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        if (!folder) {
+            throw Object.assign(new Error('recording export requires an open workspace folder'), { code: 'EXPORT_PATH_INVALID' });
+        }
+        return folder.uri.fsPath;
+    }
+
+    // 波形工具栏开始录制：消息未带变量名时回退当前图表观察列表，再回退侧栏观察列表
+    _recordingFallbackNames(watchKey) {
+        const fromChart = watchKey ? this._scalarWatchList(watchKey) : [];
+        const names = (Array.isArray(fromChart) ? fromChart : []).map(item => item.name).filter(Boolean);
+        if (names.length) return names;
+        const sidebar = this._context.workspaceState.get(CACHE_KEYS.sidebarWatchList) || [];
+        return (Array.isArray(sidebar) ? sidebar : []).map(item => item.name).filter(Boolean);
+    }
+
+    // 波形工具栏录制消息分支：开始/停止/在线导出/录制管理；结果经 recordingStatus/recordingError
+    // 回发 webview（错误码按现有风格回报），录制状态徽标由 liveStatus.recording 驱动。
+    async _handleRecordingUiMessage(message, post, watchKey) {
+        const action = message.type;
+        try {
+            if (action === 'recordingStart') {
+                const names = Array.isArray(message.names) && message.names.length ? message.names : this._recordingFallbackNames(watchKey);
+                if (!names.length) throw Object.assign(new Error(this._t('lw.needVar')), { code: 'NO_VARIABLES' });
+                await this._startRecording({ names, intervalMs: message.intervalMs });
+            } else if (action === 'recordingStop') {
+                const current = this._recordingService.status();
+                if (!current.recordingActive) {
+                    vscode.window.showInformationMessage(this._t('recording.ui.notActive'));
+                } else {
+                    const proceed = await vscode.window.showWarningMessage(this._t('recording.ui.stopConfirm'), this._t('recording.ui.stop'));
+                    if (proceed !== this._t('recording.ui.stop')) return;
+                    await this._stopRecording();
+                }
+            } else if (action === 'recordingExport') {
+                const current = this._recordingService.status();
+                if (!current.recordingActive) {
+                    vscode.window.showWarningMessage(this._t('recording.ui.notActive'));
+                    return;
+                }
+                // 活动会话在线导出：绝不清理（purgeAfterSuccess/confirmPurge 均为 false）
+                await this._runRecordingExportFlow({ recordingId: current.recordingId, purge: false });
+            } else if (action === 'recordingManage') {
+                await this._openRecordingManager();
+            }
+            post({ type: 'recordingStatus', action, ok: true, recording: this._recordingStatusSnapshot() });
+        } catch (error) {
+            post({ type: 'recordingError', action, code: error.code || 'RECORDING_FAILED', message: error.message || String(error) });
+            if (error.code !== 'NO_VARIABLES') {
+                vscode.window.showErrorMessage(this._t('recording.ui.actionFailed', { code: error.code || 'RECORDING_FAILED', msg: error.message || String(error) }));
+            }
+        }
+    }
+
+    // 录制导出共用流程：并发闸 → 保存对话框 → withProgress（可取消）→ exporter.exportRecording。
+    // purge=true 仅来自录制管理"导出并删除内部数据"路径，且必须先通过 purge 警告（调用方负责）；
+    // purgeAfterSuccess/confirmPurge 永远同现（recordingUi.purgeExportParams）。
+    async _runRecordingExportFlow({ recordingId, variables, fromMs, toMs, purge }) {
+        if (!this._recordingExportGuard.begin(recordingId)) {
+            vscode.window.showWarningMessage(this._t('recording.ui.exportBusy'));
+            return null;
+        }
+        try {
+            const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
+            const target = await vscode.window.showSaveDialog({
+                defaultUri: folder ? vscode.Uri.joinPath(folder, `emberprobe-recording-${recordingId}.csv`) : undefined,
+                filters: { 'CSV': ['csv'] },
+                saveLabel: this._t('recording.ui.exportSave')
+            });
+            if (!target) return null;
+            const handle = this._recordingExporter.exportRecording({
+                recordingId,
+                variables,
+                fromMs,
+                toMs,
+                outputPath: target.fsPath,
+                ...recordingUi.purgeExportParams(purge === true)
+            });
+            const result = await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: this._t('recording.ui.exporting'),
+                cancellable: true
+            }, async (progress, token) => {
+                token.onCancellationRequested(() => handle.cancel());
+                return handle.promise;
+            });
+            if (result && result.ok) {
+                vscode.window.showInformationMessage(this._t('recording.ui.exportDone', { rows: recordingUi.formatCount(result.rows), size: recordingUi.formatBytes(result.bytes), name: path.basename(result.outputPath) }));
+                if (result.purged) vscode.window.showInformationMessage(this._t('recording.ui.exportPurged'));
+            } else if (result && result.code === 'EXPORT_CANCELLED') {
+                vscode.window.showInformationMessage(this._t('recording.ui.exportCancelled'));
+            } else {
+                vscode.window.showErrorMessage(this._t('recording.ui.exportFailed', { code: (result && result.code) || 'EXPORT_FAILED', msg: (result && result.message) || '' }));
+            }
+            return result;
+        } finally {
+            this._recordingExportGuard.end(recordingId);
+        }
+    }
+
+    // QuickPick 的 Promise 包装：隐藏（Esc）resolve null；选择后 resolve 条目数组（多选可为空数组）
+    _pickFromQuickPick({ title, placeholder, canSelectMany, items }) {
+        return new Promise(resolve => {
+            const pick = vscode.window.createQuickPick();
+            pick.title = title;
+            if (placeholder) pick.placeholder = placeholder;
+            pick.canSelectMany = !!canSelectMany;
+            pick.matchOnDescription = true;
+            pick.items = items || [];
+            if (pick.items.length) pick.activeItems = [pick.items[0]];
+            let settled = false;
+            const done = value => {
+                if (settled) return;
+                settled = true;
+                pick.dispose();
+                resolve(value);
+            };
+            pick.onDidAccept(() => done([...pick.selectedItems]));
+            pick.onDidHide(() => done(null));
+            pick.show();
+        });
+    }
+
+    // 录制管理页（QuickPick 流程）：查看活动/中断/停止会话、已用空间、重试状态；
+    // 导出/导出并删除/停止/删除（二次确认）/刷新。循环返回列表直到用户关闭。
+    async _openRecordingManager() {
+        for (;;) {
+            const sessions = await this._recordingService.list();
+            const items = sessions.map(snapshot => recordingUi.sessionQuickPickItem(snapshot));
+            if (!items.length) {
+                vscode.window.showInformationMessage(this._t('recording.ui.noSessions'));
+                return;
+            }
+            const picked = await this._pickFromQuickPick({ title: this._t('recording.ui.manageTitle'), canSelectMany: false, items });
+            const session = picked && picked[0];
+            if (!session) return;
+            const actions = recordingUi.actionsForSession(session.snapshot);
+            const menu = [
+                { key: 'export', label: this._t('recording.ui.actionExport') },
+                { key: 'exportPurge', label: this._t('recording.ui.actionExportPurge') },
+                { key: 'stop', label: this._t('recording.ui.actionStop') },
+                { key: 'delete', label: this._t('recording.ui.actionDelete') },
+                { key: 'refresh', label: this._t('recording.ui.actionRefresh') }
+            ].filter(item => actions[item.key] !== false);
+            const chosen = await this._pickFromQuickPick({ title: this._t('recording.ui.actionTitle'), canSelectMany: false, items: menu.map(item => ({ label: item.label, key: item.key })) });
+            const action = chosen && chosen[0] ? chosen[0].key : null;
+            if (!action || action === 'refresh') continue;
+            if (action === 'export' || action === 'exportPurge') {
+                let purge = false;
+                if (action === 'exportPurge') {
+                    // 最终导出清理提示（计划要求界面预先明确提示未选择的数据也将丢弃）
+                    const proceed = await vscode.window.showWarningMessage(this._t('recording.ui.purgeWarning'), { modal: true }, this._t('recording.ui.purgeConfirm'));
+                    if (proceed !== this._t('recording.ui.purgeConfirm')) continue;
+                    purge = true;
+                }
+                const scope = await this._pickRecordingExportScope(session.snapshot);
+                if (!scope) continue;
+                await this._runRecordingExportFlow({ recordingId: session.recordingId, purge, ...scope });
+            } else if (action === 'stop') {
+                const proceed = await vscode.window.showWarningMessage(this._t('recording.ui.stopConfirm'), this._t('recording.ui.stop'));
+                if (proceed === this._t('recording.ui.stop')) await this._stopRecording();
+            } else if (action === 'delete') {
+                await this._deleteRecordingWithConfirmation(session);
+            }
+        }
+    }
+
+    // 导出子集选择：多选变量（不选 = 全部变量）+ 时间范围输入（空 = 全部）
+    async _pickRecordingExportScope(snapshot) {
+        const fixed = Array.isArray(snapshot && snapshot.fixedVariables) ? snapshot.fixedVariables : [];
+        let variables;
+        if (fixed.length) {
+            const picked = await this._pickFromQuickPick({
+                title: this._t('recording.ui.exportScopeTitle'),
+                canSelectMany: true,
+                items: fixed.map(variable => ({
+                    label: variable.name,
+                    description: [variable.type, variable.address].filter(Boolean).join(' · '),
+                    name: variable.name
+                }))
+            });
+            if (picked === null) return null;
+            variables = picked.length ? picked.map(item => item.name) : undefined;
+        }
+        const fromText = await vscode.window.showInputBox({ prompt: this._t('recording.ui.exportFromPrompt'), placeHolder: '1700000000000', ignoreFocusOut: true });
+        if (fromText === undefined) return null;
+        const toText = await vscode.window.showInputBox({ prompt: this._t('recording.ui.exportToPrompt'), placeHolder: '1700000000000', ignoreFocusOut: true });
+        if (toText === undefined) return null;
+        try {
+            const range = recordingUi.parseTimeRangeInput(fromText, toText);
+            return {
+                variables,
+                fromMs: range.fromMs === null ? undefined : range.fromMs,
+                toMs: range.toMs === null ? undefined : range.toMs
+            };
+        } catch (error) {
+            vscode.window.showErrorMessage(this._t('recording.ui.invalidRange'));
+            return null;
+        }
+    }
+
+    // 删除会话（二次确认）：活动会话先提示先停止；未导出数据将被永久丢弃需明确确认
+    async _deleteRecordingWithConfirmation(session) {
+        if (recordingUi.isActiveStatus(session.status)) {
+            vscode.window.showWarningMessage(this._t('recording.ui.deleteActive'));
+            return;
+        }
+        const proceed = await vscode.window.showWarningMessage(
+            this._t('recording.ui.deleteWarning', { id: session.recordingId }),
+            { modal: true },
+            this._t('recording.ui.deleteConfirm')
+        );
+        if (proceed !== this._t('recording.ui.deleteConfirm')) return;
+        try {
+            await this._recordingService.delete(session.recordingId, { confirmed: true });
+            vscode.window.showInformationMessage(this._t('recording.ui.deleted', { id: session.recordingId }));
+        } catch (error) {
+            vscode.window.showErrorMessage(this._t('recording.ui.actionFailed', { code: error.code || 'RECORDING_FAILED', msg: error.message || String(error) }));
+        }
     }
 
     // 录制状态快照（同步）：合并进 liveStatus 通道，Task 5 UI 消费

@@ -44,6 +44,7 @@ The sidebar lists all global/static variables of the current ELF; click a variab
 - `mcu-flash-verify`: reads target Flash and compares it with the loadable contents of the current ELF.
 - `mcu-peripheral-debug`: parses the workspace SVD, reads and decodes paused peripheral registers/fields, and performs safe writes after a fresh one-time confirmation for every request.
 - `mcu-debug-control`: starts, stops, and controls Cortex-Debug sessions, including pause/continue/stepping/restart plus source-line and function breakpoints.
+- `mcu-recording`: starts, inspects, and stops long-running recordings, streams a recording session to a workspace CSV export (optionally purging the internal data after success), and deletes recordings after explicit confirmation.
 
 ## Development & Build
 

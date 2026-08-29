@@ -43,6 +43,7 @@ EmberProbe 是一款面向 Cortex-M 开发的 VS Code 扩展。它基于 OpenOCD
 - `mcu-flash-verify`：读取目标 Flash 并与当前 ELF 的可加载内容进行校验。
 - `mcu-peripheral-debug`：解析工作区 SVD，查询、读取和解码外设寄存器/位域，并通过每次一次性确认执行暂停态安全写入。
 - `mcu-debug-control`：启动、停止和控制 Cortex-Debug 会话，支持暂停/继续/单步/重启以及源码行和函数断点管理。
+- `mcu-recording`：启动、查询、停止超长录制，把录制会话流式导出为工作区内 CSV（可选导出成功后清理内部数据），并支持经二次确认删除录制。
 
 ## 开发与构建
 

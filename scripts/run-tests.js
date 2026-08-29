@@ -50,6 +50,8 @@ const sourceFiles = [
     "src/services/recordingStorage.js",
     "src/services/recordingService.js",
     "src/services/recordingExport.js",
+    "src/services/recordingUi.js",
+    "src/services/recordingAgent.js",
     "src/services/recorderSampler.js",
     "src/i18n/index.js",
     "src/i18n/zh.js",
@@ -72,7 +74,8 @@ const sourceFiles = [
     "skills/mcu-fault-analyzer/scripts/analyze-fault.js",
     "skills/mcu-elf-analyze/scripts/analyze-elf.js",
     "skills/mcu-peripheral-debug/scripts/peripheral.js",
-    "skills/mcu-debug-control/scripts/debug.js"
+    "skills/mcu-debug-control/scripts/debug.js",
+    "skills/mcu-recording/scripts/record.js"
 ];
 
 const allTests = [
@@ -117,7 +120,9 @@ const allTests = [
     "test/recording-quota.test.js",
     "test/recording-service.test.js",
     "test/recording-sampling.test.js",
-    "test/recording-export.test.js"
+    "test/recording-export.test.js",
+    "test/recording-ui.test.js",
+    "test/recording-skills.test.js"
 ];
 
 // 发布元数据一致性检查只在发布流程运行，日常提交不做版本/README 声明校验。
