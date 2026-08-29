@@ -48,6 +48,7 @@ const sourceFiles = [
     "src/services/debugControlService.js",
     "src/services/agentOrchestrator.js",
     "src/services/recordingStorage.js",
+    "src/services/recordingService.js",
     "src/i18n/index.js",
     "src/i18n/zh.js",
     "src/i18n/en.js",
@@ -111,7 +112,8 @@ const allTests = [
     "test/write-authorization.test.js",
     "test/flash-skills.test.js",
     "test/recording-storage.test.js",
-    "test/recording-quota.test.js"
+    "test/recording-quota.test.js",
+    "test/recording-service.test.js"
 ];
 
 // 发布元数据一致性检查只在发布流程运行，日常提交不做版本/README 声明校验。
@@ -133,7 +135,8 @@ const qualityTests = [
     "test/debug-control.test.js",
     "test/hil-runner.test.js",
     "test/recording-storage.test.js",
-    "test/recording-quota.test.js"
+    "test/recording-quota.test.js",
+    "test/recording-service.test.js"
 ];
 
 function run(args) {
