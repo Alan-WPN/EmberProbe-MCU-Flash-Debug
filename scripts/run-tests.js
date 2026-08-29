@@ -122,7 +122,8 @@ const allTests = [
     "test/recording-sampling.test.js",
     "test/recording-export.test.js",
     "test/recording-ui.test.js",
-    "test/recording-skills.test.js"
+    "test/recording-skills.test.js",
+    "test/recording-stress.test.js"
 ];
 
 // 发布元数据一致性检查只在发布流程运行，日常提交不做版本/README 声明校验。
