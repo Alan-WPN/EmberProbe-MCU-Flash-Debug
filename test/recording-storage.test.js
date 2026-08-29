@@ -77,6 +77,30 @@ async function readPartLines(partPath) {
               .map((line) => JSON.parse(line));
 }
 
+// 包装真实的 writeFd 实现：注入固定延迟模拟慢磁盘（用后必须 restore）。
+function slowWriteFd(delayMs) {
+    const original = io.writeFd;
+    io.writeFd = async (fd, buffer) => {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        return original(fd, buffer);
+    };
+    return {
+        restore: () => {
+            io.writeFd = original;
+        }
+    };
+}
+
+// 轮询等待条件成立（真实时钟；用于观察后台排空任务推进）。
+async function waitUntil(predicate, timeoutMs = 5000, stepMs = 5) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        if (await predicate()) return true;
+        if (Date.now() > deadline) return false;
+        await new Promise((resolve) => setTimeout(resolve, stepMs));
+    }
+}
+
 (async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-recstorage-"));
     try {
@@ -338,6 +362,68 @@ async function readPartLines(partPath) {
             spy.restore();
         }
         console.log("batched fdatasync ok");
+
+        // ---- 背压迟滞：[低水位, 高水位) 区间保持 "high"，排空到低水位以下才回 "none" --
+        const slow = slowWriteFd(80);
+        try {
+            const clockH = makeFakeClock();
+            const sessionH = await createSession({
+                storageRoot: root,
+                workspacePath: "/demo/workspace",
+                recordingId: "rec-hysteresis",
+                fixedVariables: [{ name: "x", type: "float", address: "0x20000010" }],
+                clock: clockH,
+                writeQueueHighWatermarkBytes: 600,
+                writeQueueHardMaxBytes: 4800,
+                writeQueueLowWatermarkBytes: 300
+            });
+            const burstH = [];
+            const appendNine = () => {
+                for (let i = 0; i < 9; i += 1) burstH.push(sessionH.appendSampleLine({ values: ["1.25"] }));
+            };
+            // 第一波 9 条（约 666B ≥ 高水位 600B）：入队后进入 "high"。
+            appendNine();
+            await new Promise((resolve) => setImmediate(resolve));
+            await new Promise((resolve) => setImmediate(resolve));
+            assert.strictEqual(sessionH.backpressure, "high", "backlog at/above the high watermark is high");
+            // 慢磁盘下写 1 完成后积压落在 [低水位, 高水位) 区间（写 2 仍在途）：
+            // 迟滞要求可观测状态保持 "high"，直到排空到低水位以下。
+            // （_pendingBytes 为被测状态的原始读数：getter 本身是断言对象，不能自证。）
+            const inHysteresisBand = () => sessionH._pendingBytes > 300 && sessionH._pendingBytes < 600;
+            assert.ok(
+                await waitUntil(inHysteresisBand),
+                "partial drain must land the backlog inside [low, high) watermark band"
+            );
+            assert.strictEqual(
+                sessionH.backpressure,
+                "high",
+                "state must stay high inside [low, high) while a resume is pending"
+            );
+            // 第二波 3 条在写 2 在途时入队，排空写 2 后积压降到低水位以下：回 "none" 并写恢复事件。
+            for (let i = 0; i < 3; i += 1) burstH.push(sessionH.appendSampleLine({ values: ["1.25"] }));
+            assert.ok(
+                await waitUntil(() => sessionH.backpressure === "none"),
+                "queue must return to none only after draining below the low watermark"
+            );
+            assert.strictEqual(sessionH.backpressure, "none");
+            await sessionH.flush();
+            const resultsH = await Promise.all(burstH);
+            assert.ok(
+                resultsH.every((result) => result.written === true),
+                "no append may be rejected below hard cap"
+            );
+            const linesH = await readPartLines(sessionH.activeFilePath);
+            assert.strictEqual(linesH.filter((line) => line.seq !== undefined).length, 12, "all samples on disk");
+            assert.strictEqual(
+                linesH.filter((line) => line.event === "backpressure-resume").length,
+                1,
+                "exactly one resume event after crossing below the low watermark"
+            );
+            await sessionH.close({ status: "completed" });
+        } finally {
+            slow.restore();
+        }
+        console.log("backpressure hysteresis ok");
 
         console.log("Recording storage tests passed");
     } finally {

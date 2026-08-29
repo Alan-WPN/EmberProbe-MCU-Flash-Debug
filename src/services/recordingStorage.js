@@ -228,10 +228,21 @@ class RecordingSession {
         this._segmentLock = Promise.resolve();
     }
 
-    /** 背压状态："none" | "high"（≥ 高水位，编排层应暂停采样）| "full"（≥ 硬上限，拒绝新样本）。 */
+    /**
+     * 背压状态："none" | "high"（编排层应暂停采样）| "full"（≥ 硬上限，拒绝新样本）。
+     * 带迟滞：进入 "high" 在待写字节 ≥ 高水位时；此后即使排空到 [低水位, 高水位)
+     * 区间也保持 "high"，直到排空到低水位以下（恢复事件写盘点）才回到 "none"，
+     * 与 _backpressureActive/_maybeResumeFromBackpressure 的内部状态机一致，
+     * 避免编排层在高水位附近快速暂停/恢复震荡。
+     */
     get backpressure() {
         if (this._pendingBytes >= this.writeQueueHardMaxBytes) return "full";
-        if (this._pendingBytes >= this.writeQueueHighWatermarkBytes) return "high";
+        if (
+            this._pendingBytes >= this.writeQueueHighWatermarkBytes ||
+            (this._backpressureActive && this._pendingBytes >= this.writeQueueLowWatermarkBytes)
+        ) {
+            return "high";
+        }
         return "none";
     }
 
