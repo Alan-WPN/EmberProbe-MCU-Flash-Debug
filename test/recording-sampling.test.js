@@ -18,7 +18,10 @@ const {
     buildRecorderSample,
     consumersAfterRecorderRelease,
     createReconnectScheduler,
+    ownersAfterForceStop,
+    recorderDebugWatchdogAction,
     recorderFeedSchema,
+    recorderReconnectGate,
     recorderResumeAction,
     recorderSampleSource,
     shouldStopSampling
@@ -389,6 +392,157 @@ function makeFeedHarness(schema, consumers) {
         assert.deepStrictEqual(fired, [1]);
     }
     console.log("resume adoption auto-start ok");
+
+    // ---- Critical 1：调试占用期间（prepare 与会话存活）重连尝试不启动独立采样 ----
+    {
+        // 门控纯函数：调试启动进行中 / cortex-debug 会话存活 / activeDebugSession → 不发启动
+        assert.strictEqual(recorderReconnectGate({ debugStarting: true }), "defer-debug");
+        assert.strictEqual(recorderReconnectGate({ debugCommandPending: true }), "defer-debug");
+        assert.strictEqual(recorderReconnectGate({ debugSessionAlive: true }), "defer-debug");
+        assert.strictEqual(recorderReconnectGate({ activeDebugSession: true }), "defer-debug");
+        assert.strictEqual(recorderReconnectGate({}), "start");
+
+        // 'debug' 占用看门狗判定：会话存活/启动进行中 → keep；会话未附着（外部启动被取消）→ release
+        // （与 provider 一致：debugStarting 传 _debugStarting || _debugCommandPending 的合并值）
+        assert.strictEqual(recorderDebugWatchdogAction({ debugSessionAlive: true }), "keep");
+        assert.strictEqual(recorderDebugWatchdogAction({ activeDebugSession: true }), "keep");
+        assert.strictEqual(recorderDebugWatchdogAction({ debugStarting: true }), "keep");
+        assert.strictEqual(recorderDebugWatchdogAction({}), "release");
+
+        // 生命周期模拟（假计时器 + stub，复刻 mainViewProvider 的占用/门控序列）：
+        // 探针断连退避 → prepareForCortexDebug 登记 'debug' 占用并取消挂起重连
+        // → 占用期间（含计时器到点、误释放）绝不调用 startLiveWatch
+        // → 调试结束释放占用 → retryNow 立即重连成功。
+        const clock = makeFakeClock();
+        let fires = 0;
+        const scheduler = createReconnectScheduler({ clock, onFire: () => { fires += 1; } });
+        const sim = {
+            recordingActive: true,
+            samplingRunning: false,
+            occupations: new Set(),
+            debugSessionAlive: false,
+            activeDebugSession: false,
+            debugStarting: false,
+            debugCommandPending: false,
+            starts: 0
+        };
+        // 复刻 _attemptRecorderReconnect 的门控顺序（stub 启动成功）
+        const attempt = () => {
+            if (!sim.recordingActive) return;
+            if (sim.occupations.size > 0) return;
+            if (sim.samplingRunning) return;
+            if (recorderReconnectGate(sim) !== "start") return;
+            sim.starts += 1;
+            sim.samplingRunning = true;
+        };
+        // 探针断连 → 退避 1s 档位
+        const first = scheduler.schedule();
+        assert.strictEqual(first.delayMs, 1000);
+        // prepareForCortexDebug：登记 'debug' 占用（_noteRecorderOccupation 取消挂起重连）
+        sim.occupations.add("debug");
+        scheduler.cancel();
+        clock.advance(60000);
+        assert.strictEqual(fires, 0);
+        assert.strictEqual(sim.starts, 0); // 占用期间 retryNow/计时器均不触发启动
+        // 防御纵深：占用被误释放但调试会话仍存活 → 门控兜底，仍不启动
+        sim.occupations.delete("debug");
+        sim.debugSessionAlive = true;
+        attempt();
+        assert.strictEqual(sim.starts, 0);
+        sim.occupations.add("debug"); // 修正：占用实际仍被持有
+        // 调试会话结束（restoreSamplingAfterDebug 释放占用）→ retryNow 立即重连
+        sim.debugSessionAlive = false;
+        sim.occupations.delete("debug");
+        attempt();
+        assert.strictEqual(sim.starts, 1);
+        assert.strictEqual(sim.samplingRunning, true);
+    }
+    console.log("debug occupation gates reconnect ok");
+
+    // ---- Critical 2：任何路径下录制活跃时 'recorder' 所有者位不丢失 ----
+    {
+        // force 停止（下载/调试切换/停机）后的所有者集合：录制活跃 → 保留 recorder；已结束 → 可清空
+        assert.ok(ownersAfterForceStop(true).has("recorder"));
+        assert.strictEqual(ownersAfterForceStop(true).size, 1);
+        assert.strictEqual(ownersAfterForceStop(false).size, 0);
+
+        // 场景 harness：调试开始 → force 停止 → 调试结束 → 图表 stop 后录制仍在
+        const recording = { active: true, samplingRunning: true };
+        let owners = new Set(["recorder", "graph", "sidebar"]);
+        // 调试开始（prepareForCortexDebug）：force 停止 —— 所有者集合按 ownersAfterForceStop 重建
+        owners = ownersAfterForceStop(recording.active);
+        assert.ok(owners.has("recorder"), "force stop must keep the recorder owner bit while recording is active");
+        recording.samplingRunning = false;
+        // 调试结束（restoreSamplingAfterDebug）：录制活跃 → 补回 'recorder' 后以 'restore' 启动（注入 graph/sidebar）
+        owners.add("recorder");
+        owners.add("graph");
+        owners.add("sidebar");
+        recording.samplingRunning = true;
+        // 图表 stop（普通停止，无 force）→ 守卫命中：采样不终止，录制仍在
+        assert.strictEqual(shouldStopSampling(owners), false);
+        // 对照（旧缺陷）：若 force 停止摘掉了 recorder，普通停止会终止活动录制
+        assert.strictEqual(shouldStopSampling(new Set(["graph", "sidebar"])), true);
+
+        // 录制结束路径（_handleRecordingEnded 先清 schema 再 force 停止）→ recorder 被正确移除
+        recording.active = false;
+        owners = ownersAfterForceStop(recording.active);
+        assert.ok(!owners.has("recorder"));
+        assert.strictEqual(shouldStopSampling(owners), true);
+    }
+    console.log("recorder owner bit survives force stop ok");
+
+    // ---- Important：startLiveWatch 静默早退不算重连成功（无 gap-end、不重置退避）----
+    {
+        // 复刻 _attemptRecorderReconnect 的成败判定（门控通过后，stub startLiveWatch）：
+        // true=独立会话真正启动 / false=静默早退（调试等待、无可读取项）/ throw=启动失败
+        const makeAttempt = (startLiveWatchStub) => {
+            const clock = makeFakeClock();
+            const calls = { starts: 0, gapEnds: 0, resets: 0, retries: [] };
+            const scheduler = createReconnectScheduler({ clock, onFire: () => {
+                calls.starts += 1;
+                let started;
+                try {
+                    started = startLiveWatchStub();
+                } catch (error) {
+                    calls.retries.push(scheduler.schedule());
+                    return;
+                }
+                if (started === false) {
+                    // 静默早退：不算成功——不写 gap-end、不重置退避，重排下一档
+                    calls.retries.push(scheduler.schedule());
+                    return;
+                }
+                scheduler.reset();
+                calls.gapEnds += 1;
+            } });
+            return { clock, scheduler, calls };
+        };
+        // 静默早退（stub 模拟调试等待分支返回 false）：无 gap-end、退避未复位、下一档重试已排
+        const early = makeAttempt(() => false);
+        early.scheduler.schedule();
+        early.clock.advance(1000);
+        assert.strictEqual(early.calls.starts, 1);
+        assert.strictEqual(early.calls.gapEnds, 0);
+        assert.strictEqual(early.calls.resets, 0);
+        assert.strictEqual(early.scheduler.attempt, 2); // 未复位，已排第 2 档
+        assert.strictEqual(early.calls.retries.length, 1);
+        // 真正启动（stub 返回 true）：gap-end 写入、退避复位
+        const started = makeAttempt(() => true);
+        started.scheduler.schedule();
+        started.scheduler.schedule();
+        started.clock.advance(2000);
+        assert.strictEqual(started.calls.gapEnds, 1);
+        assert.strictEqual(started.scheduler.attempt, 0);
+        // 启动失败（stub 抛错）：重排下一档退避
+        const failed = makeAttempt(() => {
+            throw new Error("probe busy");
+        });
+        failed.scheduler.schedule();
+        failed.clock.advance(1000);
+        assert.strictEqual(failed.calls.gapEnds, 0);
+        assert.strictEqual(failed.calls.retries.length, 1);
+    }
+    console.log("silent early exit is not reconnect success ok");
 
     // ---- pause 语义：shouldPauseSampling() true 时不调用 ingestSample（stub 验证）----
     {

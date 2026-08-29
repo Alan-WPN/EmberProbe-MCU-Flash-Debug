@@ -165,6 +165,7 @@ class MainViewProvider {
         // 长录制（Task 3）：'recorder' 作为第三采样所有者；schema 随录制启停，占用与退避重连见下
         this._recorderSchema = null;
         this._recorderOccupations = new Set();
+        this._recorderDebugWatchdog = null; // 外部调试启动被取消时的 'debug' 占用有界释放计时器
         this._recorderReconnect = recorderSampler.createReconnectScheduler({
             clock: recorderSampler.defaultClock,
             onFire: () => { Promise.resolve(this._attemptRecorderReconnect()).catch(() => {}); }
@@ -1780,6 +1781,9 @@ class MainViewProvider {
         }
         for (const n of map.keys()) if (!names.has(n)) map.delete(n);
     }
+    // 启动/并入采样会话。返回 true 表示采样可用（新启动成功或已在运行）；
+    // false 表示静默早退（调试等待/无可读取项，未启动独立会话，不抛错）；失败抛出。
+    // 录制重连路径依赖该返回值区分"真正启动"与"静默早退"，后者不算重连成功。
     async startLiveWatch(items, intervalMs, consumer = 'graph') {
         if (this._downloadRunning) throw Object.assign(new Error(this._t('live.downloadRunning')), { i18nKey: 'live.downloadRunning' });
         if (this._chipInfoRunning) throw Object.assign(new Error(this._t('live.chipReading')), { i18nKey: 'live.chipReading' });
@@ -1808,11 +1812,11 @@ class MainViewProvider {
                     ? this._debugBridge.status(activeItems.length ? {} : { key: 'live.needVar' })
                 : { mode: this._debugStarting || this._debugCommandPending ? 'debug-running-waiting' : 'debug-session-conflict', key: this._debugStarting || this._debugCommandPending ? 'live.debugWaiting' : 'live.debugConflict', source: 'dap', canRead: false, canWrite: false, snapshotReady: false };
             this._postConsumerStatuses(status);
-            return;
+            return false;
         }
         if (!activeItems.length) {
             this._postConsumerStatuses({ key: 'live.needVar' });
-            return;
+            return false;
         }
         // 采样所有者：graph/sidebar 共用采样；录制器以 'recorder' 身份独立持有所有权
         const ownersToAdd = consumer === 'recorder' ? ['recorder'] : ['graph', 'sidebar'];
@@ -1821,7 +1825,7 @@ class MainViewProvider {
             this._liveSession.setWatch(this._activeReadPlan());
             if (intervalMs !== undefined) this._setLiveInterval(intervalMs);
             this._postConsumerStatuses({ key: 'sb.sampling' });
-            return;
+            return true;
         }
         const cfg = vscode.workspace.getConfiguration('emberprobe');
         const configuredExecutable = cfg.get('openocdPath', 'openocd');
@@ -1861,6 +1865,7 @@ class MainViewProvider {
             this._liveStarting = false;
             this._setLiveInterval(intervalMs || cfg.get('sampleIntervalMs', 100));
             this._postConsumerStatuses({ key: 'sb.sampling' });
+            return true;
         } catch (error) {
             this._liveStarting = false;
             if (this._liveSession === session) {
@@ -1885,7 +1890,9 @@ class MainViewProvider {
             return null;
         }
         let stopped = null;
-        this._liveConsumers.clear();
+        // 强制停止（下载/调试切换/停机等探针接管）也不得摘除 'recorder' 所有权位：
+        // 录制仍活跃时任何路径下丢失该位，都会让普通停止请求终止活动录制且无重连恢复。
+        this._liveConsumers = recorderSampler.ownersAfterForceStop(this._recorderSchema != null);
         if (this._liveSession) { try { stopped = this._liveSession.stop(); } catch (e) { /* ignore */ } this._liveSession = null; }
         this._liveWatchRunning = false;
         if (!preserveIntent) {
@@ -2109,14 +2116,32 @@ class MainViewProvider {
         void this._recordingService.noteRetryScheduled({ attempt: info.attempt, nextAtMs: info.nextAtMs });
     }
 
-    // 退避重连尝试：复用 startLiveWatch 的启动路径（托管/独立由现有逻辑决定）；
-    // 成功写 gap-end 并复位退避序列；失败排下一档退避并上报 retry 状态。
+    // 退避重连尝试：复用 startLiveWatch 的启动路径（托管/独立由现有逻辑决定）。
+    // 门控：显式占用或 cortex-debug 启动/会话存活期间不发启动（避免争抢探针），
+    // defer 时保持退避循环；成功（独立会话真正启动）写 gap-end 并复位退避序列；
+    // 静默早退（调试等待/无可读取项）不算成功——不写 gap-end、不重置退避，重排下一档；
+    // 失败排下一档退避并上报 retry 状态。
     async _attemptRecorderReconnect() {
         if (!this._recorderSchema) return;
         if (this._recorderOccupations.size > 0) return;
         if (this._liveWatchRunning || this._liveSession) return;
+        const gate = recorderSampler.recorderReconnectGate({
+            debugStarting: this._debugStarting,
+            debugCommandPending: this._debugCommandPending,
+            debugSessionAlive: this._debugBridge.hasAnySession,
+            activeDebugSession: vscode.debug.activeDebugSession?.type === 'cortex-debug'
+        });
+        if (gate !== 'start') {
+            this._ensureRecorderReconnect();
+            return;
+        }
         try {
-            await this.startLiveWatch(undefined, undefined, 'recorder');
+            const started = await this.startLiveWatch(undefined, undefined, 'recorder');
+            if (started === false) {
+                const info = this._recorderReconnect.schedule();
+                void this._recordingService.noteRetryScheduled({ attempt: info.attempt, nextAtMs: info.nextAtMs });
+                return;
+            }
             this._recorderReconnect.reset();
             void this._recordingService.noteProbeReconnected();
             this._postConsumerStatuses({ key: 'sb.sampling' });
@@ -2125,6 +2150,28 @@ class MainViewProvider {
             const info = this._recorderReconnect.schedule();
             void this._recordingService.noteRetryScheduled({ attempt: info.attempt, nextAtMs: info.nextAtMs });
             this._postConsumerStatuses({ message: error.message });
+        }
+    }
+
+    // 'debug' 占用看门狗：外部 cortex-debug 启动被取消/解析失败时调试会话不会附着，
+    // 占用须有界释放，否则录制重连被永久阻塞；会话正常附着时由 handleDebugSessionStart 解除。
+    _armRecorderDebugWatchdog() {
+        this._disarmRecorderDebugWatchdog();
+        this._recorderDebugWatchdog = setTimeout(() => {
+            this._recorderDebugWatchdog = null;
+            const action = recorderSampler.recorderDebugWatchdogAction({
+                debugSessionAlive: this._debugBridge.hasAnySession,
+                activeDebugSession: vscode.debug.activeDebugSession?.type === 'cortex-debug',
+                debugStarting: this._debugStarting || this._debugCommandPending
+            });
+            if (action === 'release') this._releaseRecorderOccupation('debug');
+        }, 15000);
+    }
+
+    _disarmRecorderDebugWatchdog() {
+        if (this._recorderDebugWatchdog) {
+            clearTimeout(this._recorderDebugWatchdog);
+            this._recorderDebugWatchdog = null;
         }
     }
     async prepareForCortexDebug(folder, config) {
@@ -2138,17 +2185,19 @@ class MainViewProvider {
         }
         const agentStopped = this.stopAgentReadIfRunning();
         if (agentStopped) await agentStopped;
-        if (this._liveWatchRunning || this._liveSession) {
-            // 调试切换是显式占用（探针被 Cortex-Debug 接管）：强制停采样，结束后由
-            // restoreSamplingAfterDebug 恢复；恢复失败时录制退避重连继续尝试。
-            const recorderOwned = this._recorderSchema != null;
-            if (recorderOwned) this._noteRecorderOccupation('debug');
-            try {
-                const stopped = this.stopLiveWatch({ force: true, preserveIntent: true });
-                if (stopped) await stopped;
-            } finally {
-                if (recorderOwned) this._releaseRecorderOccupation('debug');
+        // 调试切换是显式占用（探针被 Cortex-Debug 接管）：'debug' 占用持续到调试会话真正结束
+        // 或启动失败的确定点（restoreSamplingAfterDebug 释放），期间录制重连不与调试争抢探针；
+        // 外部启动被用户取消/解析失败时调试会话不会附着，由看门狗有界释放。
+        const recorderOwned = this._recorderSchema != null;
+        if (recorderOwned) {
+            this._noteRecorderOccupation('debug');
+            if (!this._debugBridge.hasAnySession && vscode.debug.activeDebugSession?.type !== 'cortex-debug') {
+                this._armRecorderDebugWatchdog();
             }
+        }
+        if (this._liveWatchRunning || this._liveSession) {
+            const stopped = this.stopLiveWatch({ force: true, preserveIntent: true });
+            if (stopped) await stopped;
             this._postConsumerStatuses({ mode: 'debug-running-waiting', key: 'live.debugWaiting', source: 'dap', canRead: false, canWrite: false, snapshotReady: false });
         } else if (this._samplingIntent) {
             this._postConsumerStatuses({ mode: 'debug-running-waiting', key: 'live.debugWaiting', source: 'dap', snapshotReady: false });
@@ -2156,6 +2205,8 @@ class MainViewProvider {
     }
     handleDebugSessionStart(session) {
         if (!session || session.type !== 'cortex-debug') return;
+        // 调试会话已附着：'debug' 占用合法持有到会话结束，看门狗不再需要
+        this._disarmRecorderDebugWatchdog();
         this._debugReadPlanKey = this._activeReadPlan().map(item => `${item.name}:${item.address}:${item.size}`).join('|');
         // 多根工作区中会话归属以 VS Code 实际调试目录为准，避免被缓存 ELF 所在目录覆盖。
         this._debugBridge.setWorkspace(session.workspaceFolder || this._commandContext().folder);
@@ -2185,23 +2236,33 @@ class MainViewProvider {
     }
     async restoreSamplingAfterDebug() {
         if (this._debugBridge.hasAnySession) {
+            // 其他调试会话仍存活：'debug' 占用继续保持
             this._postConsumerStatuses(this._debugBridge.status());
             return;
         }
         if (this._managedDebugServer) await this._stopManagedDebugServer();
-        if (!this._samplingIntent) {
-            this._postConsumerStatuses({ mode: 'stopped', key: 'sb.stopped', source: 'none' });
-            return;
-        }
-        this._postConsumerStatuses({ mode: 'restoring', key: 'live.restoring', source: 'openocd', canRead: false, canWrite: false });
-        await new Promise(resolve => setTimeout(resolve, 350));
-        if (!this._samplingIntent || this._debugBridge.hasAnySession) return;
         try {
-            await this.startLiveWatch(undefined, this._liveIntervalMs, 'restore');
-        } catch (error) {
-            // 录制仍活跃时退避重连接手（探针可能被其他进程占用或已断开）
-            if (this._recorderSchema) this._ensureRecorderReconnect();
-            this._postConsumerStatuses({ mode: 'restore-failed', key: error.i18nKey, message: error.message, source: 'none' }, true);
+            if (!this._samplingIntent) {
+                this._postConsumerStatuses({ mode: 'stopped', key: 'sb.stopped', source: 'none' });
+                return;
+            }
+            this._postConsumerStatuses({ mode: 'restoring', key: 'live.restoring', source: 'openocd', canRead: false, canWrite: false });
+            await new Promise(resolve => setTimeout(resolve, 350));
+            if (!this._samplingIntent || this._debugBridge.hasAnySession) return;
+            // 录制仍活跃时补回 'recorder' 所有者位（'restore' 启动只注入 graph/sidebar）
+            if (this._recorderSchema) this._liveConsumers.add('recorder');
+            try {
+                await this.startLiveWatch(undefined, this._liveIntervalMs, 'restore');
+            } catch (error) {
+                // 录制仍活跃时退避重连接手（探针可能被其他进程占用或已断开）
+                if (this._recorderSchema) this._ensureRecorderReconnect();
+                this._postConsumerStatuses({ mode: 'restore-failed', key: error.i18nKey, message: error.message, source: 'none' }, true);
+            }
+        } finally {
+            // 调试会话真正结束（或启动失败）的确定点：释放 'debug' 显式占用；
+            // 录制仍活跃且采样未运行时立即重连（不等待退避计时器）。
+            this._disarmRecorderDebugWatchdog();
+            this._releaseRecorderOccupation('debug');
         }
     }
     disposeDebugBridge() {
@@ -2217,8 +2278,9 @@ class MainViewProvider {
             }
             await this._stopManagedDebugServer();
             // 扩展宿主退出：强制停采样会话（录制会话保留在磁盘上，重启后由 Task 2 恢复续录）；
-            // 挂起的退避重连计时器一并取消。
+            // 挂起的退避重连计时器与调试占用看门狗一并取消。
             this._recorderReconnect.cancel();
+            this._disarmRecorderDebugWatchdog();
             const stopped = this.stopLiveWatch({ force: true });
             if (stopped) await stopped;
             this.disposeDebugBridge();

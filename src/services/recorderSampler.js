@@ -150,6 +150,49 @@ function recorderResumeAction(status, state = {}) {
 }
 
 /**
+ * 退避重连/立即重连尝试的探针门控：cortex-debug 启动进行中或调试会话存活时，
+ * 独立 OpenOCD 采样会话不得启动（避免与调试争抢探针）；defer 时保持退避循环，
+ * 调试结束后由 restoreSamplingAfterDebug / 占用释放路径接手。
+ * @param {{debugStarting?: boolean, debugCommandPending?: boolean,
+ *          debugSessionAlive?: boolean, activeDebugSession?: boolean}} [state]
+ * @returns {"start"|"defer-debug"}
+ */
+function recorderReconnectGate(state = {}) {
+    const debugBusy =
+        state.debugStarting === true ||
+        state.debugCommandPending === true ||
+        state.debugSessionAlive === true ||
+        state.activeDebugSession === true;
+    return debugBusy ? "defer-debug" : "start";
+}
+
+/**
+ * 调试占用看门狗判定：'debug' 显式占用必须持续到调试会话真正结束或启动失败；
+ * 外部 cortex-debug 启动被用户取消/解析失败时调试会话始终不会附着，占用须在看门狗
+ * 到点后有界释放，否则录制重连被永久阻塞。
+ * @param {{debugSessionAlive?: boolean, activeDebugSession?: boolean,
+ *          debugStarting?: boolean}} [state]
+ * @returns {"keep"|"release"}
+ */
+function recorderDebugWatchdogAction(state = {}) {
+    const alive = state.debugSessionAlive === true || state.activeDebugSession === true || state.debugStarting === true;
+    return alive ? "keep" : "release";
+}
+
+/**
+ * 强制停止（探针被下载/调试切换/扩展停机接管）后的采样所有者集合：
+ * 录制仍活跃时必须保留 'recorder' 所有权位——任何路径下丢失该位都会让
+ * 普通（无 force）停止请求终止活动录制且无重连恢复。
+ * @param {boolean} recordingActive 录制会话是否仍活跃
+ * @returns {Set<string>}
+ */
+function ownersAfterForceStop(recordingActive) {
+    const owners = new Set();
+    if (recordingActive === true) owners.add("recorder");
+    return owners;
+}
+
+/**
  * 可注入时钟（与 recordingService 的 clock 契约一致）。
  * @typedef {{now: () => number, setTimeout: (fn: () => void, ms: number) => any,
  *            clearTimeout: (timer: any) => void}} SamplerClock
@@ -237,6 +280,9 @@ module.exports = {
     shouldStopSampling,
     consumersAfterRecorderRelease,
     recorderResumeAction,
+    recorderReconnectGate,
+    recorderDebugWatchdogAction,
+    ownersAfterForceStop,
     RecorderReconnectScheduler,
     createReconnectScheduler
 };
