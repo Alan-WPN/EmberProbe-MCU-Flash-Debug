@@ -132,6 +132,24 @@ function consumersAfterRecorderRelease(consumers) {
 }
 
 /**
+ * 重启续录会话采纳后的采样恢复决策（计划：配置/ELF/硬件全部匹配的自动续录应恢复产生样本）。
+ * @param {{recordingActive?: boolean}} status recordingService.whenReady() 的状态快照
+ * @param {{samplingRunning?: boolean, occupationActive?: boolean}} [state]
+ *   samplingRunning：standalone 采样会话是否在运行；occupationActive：下载/调试切换等显式占用是否进行中
+ * @returns {"start"|"refresh"|"defer"|null}
+ *   "start"：采样未运行且无显式占用 → 以 'recorder' 为所有者自动走现有启动路径；
+ *   "refresh"：采样已运行 → 仅把录制变量并入读取计划；
+ *   "defer"：显式占用进行中 → 暂缓（占用释放后的立即重连机制接手）；
+ *   null：非活动会话，不采纳。
+ */
+function recorderResumeAction(status, state = {}) {
+    if (!status || status.recordingActive !== true) return null;
+    if (state.samplingRunning === true) return "refresh";
+    if (state.occupationActive === true) return "defer";
+    return "start";
+}
+
+/**
  * 可注入时钟（与 recordingService 的 clock 契约一致）。
  * @typedef {{now: () => number, setTimeout: (fn: () => void, ms: number) => any,
  *            clearTimeout: (timer: any) => void}} SamplerClock
@@ -218,6 +236,7 @@ module.exports = {
     recorderSampleSource,
     shouldStopSampling,
     consumersAfterRecorderRelease,
+    recorderResumeAction,
     RecorderReconnectScheduler,
     createReconnectScheduler
 };

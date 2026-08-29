@@ -229,13 +229,19 @@ class MainViewProvider {
             vscode.commands.registerCommand('emberprobe.recording.status', () => this._recordingService.status())
         ];
         for (const disposable of this._recordingCommands) this._context.subscriptions.push(disposable);
-        // 扩展重启自动续录（Task 2）：接管恢复会话的固定 schema，采样恢复运行后数据自动续流；
-        // 不在激活时强制启动探针（避免后台抢占）。
+        // 扩展重启自动续录（Task 2）：配置/ELF/硬件全部匹配才恢复会话；计划要求自动续录
+        // 恢复产生样本——采样未运行且无显式占用时以 'recorder' 为所有者自动启动采样；
+        // 硬件不可用则保持 pending，复用退避重连与占用释放恢复机制（noteRetryScheduled）。
         this._recordingService.whenReady().then(status => {
             if (!status || !status.recordingActive || this._recorderSchema) return;
             this._adoptRecordingSchema(status);
             this._liveConsumers.add('recorder');
-            if (this._liveSession) this._liveSession.setWatch(this._activeReadPlan());
+            const action = recorderSampler.recorderResumeAction(status, {
+                samplingRunning: !!this._liveSession,
+                occupationActive: this._recorderOccupations.size > 0
+            });
+            if (action === 'start') void this._resumeRecorderSampling();
+            else if (action === 'refresh') this._liveSession.setWatch(this._activeReadPlan());
             this._postConsumerStatuses({});
         }).catch(() => {});
         this._openOcdStatusService = new OpenOcdStatusService({
@@ -1960,6 +1966,26 @@ class MainViewProvider {
         }
     }
 
+    // 恢复录制采样（recording.start 与重启续录采纳共用）：'recorder' 为所有者，
+    // 复用 startLiveWatch 的现有启动路径与互斥；启动失败（探针被占用/硬件不可用）不回滚
+    // 录制——保持 pending，由退避重连（noteRetryScheduled）与占用释放后的立即重连接手，
+    // 不无限硬重试。
+    async _resumeRecorderSampling(intervalMs) {
+        this._liveConsumers.add('recorder');
+        try {
+            if (this._liveSession) {
+                this._liveSession.setWatch(this._activeReadPlan());
+            } else if (this._debugBridge.hasSession) {
+                // 调试会话采样路径（DAP/托管 runtime）：刷新意图与读取计划，把录制变量并入
+                await this._refreshSamplingPlan();
+            } else {
+                await this.startLiveWatch(undefined, intervalMs, 'recorder');
+            }
+        } catch (error) {
+            this._ensureRecorderReconnect();
+        }
+    }
+
     // 启动长录制：解析变量冻结 schema；'recorder' 加入所有者集合，采样未运行则自动启动，
     // 已运行则仅把录制变量并入读取计划（图表变量修改只影响显示）。采样启动失败不回滚录制。
     async _startRecording(params = {}) {
@@ -1977,20 +2003,7 @@ class MainViewProvider {
         }
         this._recorderReconnect.reset();
         this._adoptRecordingSchema(status);
-        this._liveConsumers.add('recorder');
-        try {
-            if (this._liveSession) {
-                this._liveSession.setWatch(this._activeReadPlan());
-            } else if (this._debugBridge.hasSession) {
-                // 调试会话采样路径（DAP/托管 runtime）：刷新意图与读取计划，把录制变量并入
-                await this._refreshSamplingPlan();
-            } else {
-                await this.startLiveWatch(undefined, intervalMs, 'recorder');
-            }
-        } catch (error) {
-            // 采样启动失败不回滚录制：退避重连持续尝试，恢复后自动续录
-            this._ensureRecorderReconnect();
-        }
+        await this._resumeRecorderSampling(intervalMs);
         this._postConsumerStatuses({ key: 'sb.sampling' });
         return this._recordingService.status();
     }

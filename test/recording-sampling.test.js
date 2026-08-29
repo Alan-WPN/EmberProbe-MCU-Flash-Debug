@@ -19,6 +19,7 @@ const {
     consumersAfterRecorderRelease,
     createReconnectScheduler,
     recorderFeedSchema,
+    recorderResumeAction,
     recorderSampleSource,
     shouldStopSampling
 } = require("../src/services/recorderSampler");
@@ -325,6 +326,69 @@ function makeFeedHarness(schema, consumers) {
         assert.strictEqual(recorderSampleSource(new Set(["recorder"])), "recorder");
     }
     console.log("owner semantics ok");
+
+    // ---- 重启续录采纳：配置/ELF/硬件匹配的恢复会话应自动恢复产生样本 ----
+    {
+        const resumed = {
+            recordingActive: true,
+            status: "recording",
+            fixedVariables: [{ name: "temp", type: "u32", address: "0x20000000", size: 4 }],
+            createdAtMs: 1000
+        };
+        // 决策纯函数：采样未运行且无占用 → 自动启动；已运行 → 仅并入读取计划；占用中 → 暂缓
+        assert.strictEqual(recorderResumeAction(resumed, { samplingRunning: false, occupationActive: false }), "start");
+        assert.strictEqual(recorderResumeAction(resumed, { samplingRunning: true }), "refresh");
+        assert.strictEqual(recorderResumeAction(resumed, { occupationActive: true }), "defer");
+        assert.strictEqual(recorderResumeAction(null, {}), null);
+        assert.strictEqual(recorderResumeAction({ recordingActive: false }, {}), null);
+
+        // 轻量 harness：复刻 mainViewProvider 构造期 whenReady() 采纳回调的动作序列
+        const clock = makeFakeClock();
+        const fired = [];
+        const scheduler = createReconnectScheduler({ clock, onFire: (attempt) => fired.push(attempt) });
+        const adopt = (state, options) => {
+            // 复刻采纳回调：先取得 'recorder' 所有权，再按决策启动/刷新/暂缓
+            const action = recorderResumeAction(resumed, options);
+            state.owners.add("recorder");
+            if (action === "start") {
+                state.startCalls += 1;
+                if (options.startFails) {
+                    // 启动失败（硬件不可用）：不硬重试，退避调度（noteRetryScheduled）接手
+                    state.retries.push(scheduler.schedule());
+                }
+            } else if (action === "refresh") state.refreshCalls += 1;
+            state.statusPosts += 1;
+            return state;
+        };
+        const makeState = () => ({ owners: new Set(), startCalls: 0, refreshCalls: 0, retries: [], statusPosts: 0 });
+
+        // 采样未运行且无占用 → 启动路径被调用，所有者含 'recorder'
+        const auto = adopt(makeState(), { samplingRunning: false, occupationActive: false });
+        assert.strictEqual(auto.startCalls, 1);
+        assert.ok(auto.owners.has("recorder"));
+        assert.strictEqual(auto.retries.length, 0);
+
+        // 采样已运行 → 不重复启动，仅刷新读取计划
+        const running = adopt(makeState(), { samplingRunning: true });
+        assert.strictEqual(running.startCalls, 0);
+        assert.strictEqual(running.refreshCalls, 1);
+        assert.ok(running.owners.has("recorder"));
+
+        // 显式占用进行中（下载/调试切换）→ 暂缓启动，占用释放后的立即重连接手
+        const deferred = adopt(makeState(), { occupationActive: true });
+        assert.strictEqual(deferred.startCalls, 0);
+        assert.ok(deferred.owners.has("recorder"));
+
+        // 硬件不可用（启动失败）→ 保持 pending：退避 1s 档位调度，假计时器到点触发重连
+        const failed = adopt(makeState(), { samplingRunning: false, startFails: true });
+        assert.strictEqual(failed.startCalls, 1);
+        assert.strictEqual(failed.retries.length, 1);
+        assert.strictEqual(failed.retries[0].delayMs, 1000);
+        assert.ok(failed.retries[0].nextAtMs > 0);
+        clock.advance(1000);
+        assert.deepStrictEqual(fired, [1]);
+    }
+    console.log("resume adoption auto-start ok");
 
     // ---- pause 语义：shouldPauseSampling() true 时不调用 ingestSample（stub 验证）----
     {
