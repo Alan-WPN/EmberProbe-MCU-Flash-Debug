@@ -136,6 +136,16 @@
           "type": "number",
           "default": 2000,
           "description": "实时曲线每个通道保留的最大采样点数"
+        },
+        "emberprobe.recordingMaxMiB": {
+          "type": "number",
+          "default": 1024,
+          "description": "单个工作区长录制数据的最大磁盘占用（MiB），有效范围 64–102400，超出范围时自动收敛到边界值"
+        },
+        "emberprobe.recordingGlobalMaxMiB": {
+          "type": "number",
+          "default": 2048,
+          "description": "所有工作区长录制数据的总磁盘占用上限（MiB），有效范围 128–204800，超出范围时自动收敛到边界值"
         }
       }
     }

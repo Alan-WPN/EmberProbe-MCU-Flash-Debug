@@ -47,6 +47,7 @@ const sourceFiles = [
     "src/services/svdPeripheralService.js",
     "src/services/debugControlService.js",
     "src/services/agentOrchestrator.js",
+    "src/services/recordingStorage.js",
     "src/i18n/index.js",
     "src/i18n/zh.js",
     "src/i18n/en.js",
@@ -108,7 +109,8 @@ const allTests = [
     "test/var-write.test.js",
     "test/fault-info.test.js",
     "test/write-authorization.test.js",
-    "test/flash-skills.test.js"
+    "test/flash-skills.test.js",
+    "test/recording-storage.test.js"
 ];
 
 // 发布元数据一致性检查只在发布流程运行，日常提交不做版本/README 声明校验。
