@@ -28,6 +28,7 @@ const fsp = fs.promises;
 // fs.promises 没有裸 fd 的 fdatasync；用回调版包装，并通过自有对象引用，
 // 使测试可以观测/注入 fdatasync、rename 与 writeFd（写队列慢磁盘/EIO 注入点）。
 const io = {
+    /** @type {(fd: number) => Promise<void>} */
     fdatasync: (fd) =>
         new Promise((resolve, reject) => {
             fs.fdatasync(fd, (error) => (error ? reject(error) : resolve()));
@@ -53,6 +54,12 @@ const QUOTA_LOCK_STALE_MS = 10 * 1000;
 const QUOTA_LOCK_RETRY_MS = 50;
 const QUOTA_LOCK_RETRY_LIMIT = 20;
 const BYTES_PER_MIB = 1024 * 1024;
+
+/**
+ * 可注入时钟（与 recordingService/recorderSampler 的 clock 契约一致）。
+ * @typedef {{now: () => number, setTimeout: (fn: () => void, ms: number) => any,
+ *            clearTimeout: (timer: any) => void}} RecordingClock
+ */
 
 const defaultClock = {
     now: () => Date.now(),
@@ -106,12 +113,14 @@ function openFd(filePath, flags) {
     });
 }
 
+/** @returns {Promise<void>} */
 function closeFd(fd) {
     return new Promise((resolve, reject) => {
         fs.close(fd, (error) => (error ? reject(error) : resolve()));
     });
 }
 
+/** @returns {Promise<void>} */
 function writeFd(fd, buffer) {
     return new Promise((resolve, reject) => {
         fs.write(fd, buffer, 0, buffer.length, (error, written) => {
@@ -854,7 +863,7 @@ class RecordingSession {
 /**
  * 创建新录制会话：建目录、写初始 manifest 并打开第一个活动段。
  * @param {object} options
- * @param {string} options.storageRoot 存储根目录（如扩展 globalStorage 目录）
+ * @param {string} [options.storageRoot] 存储根目录（如扩展 globalStorage 目录）；缺失时抛出
  * @param {string} [options.workspacePath] 工作区路径（用于计算哈希）
  * @param {string} [options.workspaceHash] 预计算的工作区哈希
  * @param {string} [options.recordingId] 省略时自动生成
@@ -864,7 +873,7 @@ class RecordingSession {
  * @param {string} [options.mcuId]
  * @param {string} [options.debuggerId]
  * @param {{maxMiB?: number, globalMaxMiB?: number}} [options.limits]
- * @param {object} [options.clock] 可注入时钟 {now, setTimeout, clearTimeout}
+ * @param {RecordingClock} [options.clock] 可注入时钟 {now, setTimeout, clearTimeout}
  * @param {object} [options.quota] 可注入的配额管理器（createQuotaManager 返回值）；省略时不限配额
  * @param {Function} [options.onQuotaExceeded] 配额拒绝回调 (reason, result) => Promise|void，
  *   供上层把会话置为 "stopped-quota" 等安全停止状态
@@ -929,6 +938,12 @@ async function createSession(options = {}) {
 }
 
 /**
+ * 恢复后 manifest 的最小读取形状（磁盘 JSON 文档，字段可能缺失或由旧版本写入）。
+ * @typedef {object} RecoveredSessionManifest
+ * @property {{name: string, file: string, createdAtMs: number|null, samples: number, bytes: number}|null} [activeSegment] 活动段（续录在其 .part 后追加）
+ */
+
+/**
  * 恢复一个可能中断的会话目录：
  *   - 清理残留的 *.tmp 临时文件；
  *   - 对已有封存 .gz 的同索引陈旧 .part（rename 成功但 unlink 前崩溃的窗口）只保留 .gz；
@@ -937,10 +952,10 @@ async function createSession(options = {}) {
  *   - 按磁盘文件重建段列表，原子写回修复后的 manifest（状态置为 "interrupted"）；
  *   - 损坏/不可解析的 manifest.json 视同缺失，从磁盘重建。
  * @param {{sessionDir?: string, storageRoot?: string, workspacePath?: string, workspaceHash?: string,
- *          recordingId?: string, clock?: object}} options
+ *          recordingId?: string, clock?: RecordingClock}} options
  * @returns {Promise<{sessionDir: string, hadManifest: boolean, truncated: boolean, truncatedBytes: number,
  *          recoveredLines: number, sequenceCounter: number, partFiles: string[], staleParts: string[],
- *          segments: object[], manifest: object}>}
+ *          segments: object[], manifest: RecoveredSessionManifest}>}
  */
 async function recoverSession(options = {}) {
     const clock = options.clock || defaultClock;
@@ -965,7 +980,9 @@ async function recoverSession(options = {}) {
         sequenceCounter: existing && Number.isInteger(existing.sequenceCounter) ? existing.sequenceCounter : 0,
         partFiles: [],
         staleParts: [],
-        segments: []
+        segments: [],
+        // 返回前写入重建/修复后的 manifest（见 @returns 契约）。
+        manifest: null
     };
     const entries = await fsp.readdir(sessionDir);
     // 清理上次原子写入崩溃残留的临时文件。
@@ -1444,7 +1461,7 @@ class RecordingQuotaManager {
 
 /**
  * 创建跨进程录制配额管理器。
- * @param {{storageRoot?: string, maxMiB?: number, globalMaxMiB?: number, clock?: object, now?: Function}} options
+ * @param {{storageRoot?: string, maxMiB?: number, globalMaxMiB?: number, clock?: RecordingClock, now?: Function}} options
  *   storageRoot 必填（缺失时抛出）；maxMiB/globalMaxMiB 经 resolveRecordingLimits 收敛
  *   （默认 1024/2048，即 1 GiB / 2 GiB）；clock/now 仅作为陈旧锁检测的时间源，省略时使用系统时钟。
  * @returns {RecordingQuotaManager}
