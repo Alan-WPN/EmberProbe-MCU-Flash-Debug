@@ -12,6 +12,9 @@
  *   {"seq":1,"ts":1690000000000,"el":100,"src":"live","full":true,"v":["1.23",null,"0x10"]}\n
  *
  * 纯 Node 模块：不依赖 vscode，storageRoot 由调用方注入。
+ *
+ * 配额管理：createQuotaManager 提供跨进程锁保护的全局用量统计，在创建分段与压缩
+ * 临时文件前预留空间；达到上限时安全停止并保留已有数据，绝不截断、绝不循环覆盖。
  */
 
 const fs = require("fs");
@@ -39,6 +42,11 @@ const SEGMENT_MAX_BYTES = 32 * 1024 * 1024;
 const SYNC_INTERVAL_MS = 1000;
 const MAX_MIB_LIMITS = { min: 64, max: 102400, fallback: 1024 };
 const GLOBAL_MAX_MIB_LIMITS = { min: 128, max: 204800, fallback: 2048 };
+const QUOTA_LOCK_FILE = "quota.lock";
+const QUOTA_LOCK_STALE_MS = 10 * 1000;
+const QUOTA_LOCK_RETRY_MS = 50;
+const QUOTA_LOCK_RETRY_LIMIT = 20;
+const BYTES_PER_MIB = 1024 * 1024;
 
 const defaultClock = {
     now: () => Date.now(),
@@ -79,7 +87,10 @@ function sessionDirFor(storageRoot, wsHash, recordingId) {
 }
 
 function nextRecordingId(nowMs = Date.now()) {
-    const stamp = new Date(nowMs).toISOString().replace(/[-:T.]/g, "").slice(0, 14);
+    const stamp = new Date(nowMs)
+        .toISOString()
+        .replace(/[-:T.]/g, "")
+        .slice(0, 14);
     return `${stamp}-${crypto.randomBytes(2).toString("hex")}`;
 }
 
@@ -167,7 +178,9 @@ class RecordingSession {
         clock = defaultClock,
         segmentMaxBytes = SEGMENT_MAX_BYTES,
         segmentMaxAgeMs = SEGMENT_MAX_AGE_MS,
-        syncIntervalMs = SYNC_INTERVAL_MS
+        syncIntervalMs = SYNC_INTERVAL_MS,
+        quota = null,
+        onQuotaExceeded = null
     }) {
         this.sessionDir = sessionDir;
         this.manifest = manifest;
@@ -175,6 +188,10 @@ class RecordingSession {
         this.segmentMaxBytes = segmentMaxBytes;
         this.segmentMaxAgeMs = segmentMaxAgeMs;
         this.syncIntervalMs = syncIntervalMs;
+        this.quota = quota;
+        this.onQuotaExceeded = onQuotaExceeded;
+        // 配额拒绝后的安全停止原因；null 表示未停止（未注入 quota 时永远为 null）。
+        this.quotaStopReason = null;
         this.active = null;
         this.closed = false;
         this._dirty = false;
@@ -188,6 +205,48 @@ class RecordingSession {
 
     _ensureOpen() {
         if (this.closed) throw new Error("recording session is closed");
+    }
+
+    /**
+     * 尝试为即将进行的写入预留配额；返回 false 表示配额拒绝，会话已转入安全停止。
+     * 配额管理器抛出的异常同样按拒绝处理，保证写入路径不产生未处理异常。
+     */
+    async _reserveQuota(bytes) {
+        if (!this.quota) return true;
+        let result;
+        try {
+            result = await this.quota.reserve(this.sessionDir, bytes);
+        } catch (error) {
+            result = { ok: false, reason: "quota-manager-error", error: error && error.message };
+        }
+        if (result && result.ok) return true;
+        await this._handleQuotaRejection(result);
+        return false;
+    }
+
+    /** 配额拒绝的统一处理：记录并持久化错误日志、标记安全停止并通知 onQuotaExceeded 回调。 */
+    async _handleQuotaRejection(result) {
+        if (!this.quotaStopReason) {
+            this.quotaStopReason = (result && result.reason) || "quota-exceeded";
+            this.recordError("quota-exceeded", new Error(this.quotaStopReason));
+            try {
+                await writeManifest(this.sessionDir, this.manifest);
+            } catch {
+                // 磁盘配额/IO 异常时持久化可能失败：内存态已记录，不阻塞安全停止。
+            }
+        }
+        if (typeof this.onQuotaExceeded === "function") {
+            try {
+                await this.onQuotaExceeded(this.quotaStopReason, result);
+            } catch {
+                // 回调异常不外泄，写入路径保持安全。
+            }
+        }
+    }
+
+    /** 配额停止后的占位返回：采样不写入，已入队/已写数据保持原样。 */
+    _appendRejected() {
+        return { seq: this.manifest.sequenceCounter, line: "", written: false };
     }
 
     /** 下一个段序号：扫描 manifest 与磁盘上已有段文件取最大索引 + 1。 */
@@ -204,7 +263,17 @@ class RecordingSession {
         return maxIndex + 1;
     }
 
+    /**
+     * 打开新的活动段。注入配额管理器时，先按段大小上限（segmentMaxBytes）预留空间：
+     * 追加写入不再逐条预留，段内增长被该预留覆盖。预留被拒绝时返回 false
+     * （会话已转入安全停止），绝不创建段文件。
+     * @returns {Promise<boolean>} 是否成功打开
+     */
     async _openNewSegment() {
+        if (this.quota) {
+            const reserved = await this._reserveQuota(this.segmentMaxBytes);
+            if (!reserved) return false;
+        }
         const name = `seg-${String(await this._nextSegmentIndex()).padStart(6, "0")}`;
         const file = `${name}.ndjson.part`;
         const filePath = path.join(this.sessionDir, file);
@@ -225,6 +294,7 @@ class RecordingSession {
             }
             throw error;
         }
+        return true;
     }
 
     _buildLine(sample, seq) {
@@ -251,14 +321,22 @@ class RecordingSession {
 
     /**
      * 追加一条采样行。自动分配递增序号，写入活动段并合并 1 秒批量同步。
+     * 配额拒绝时安全停止：返回 written:false 的占位结果且不抛出异常，
+     * 已写入的数据原样保留。
      * @param {{source?: string, full?: boolean, timestampMs?: number, elapsedMs?: number, values?: Array}} sample
      *   values 为固定列的 valueText 数组（按 fixedVariables 顺序），缺失值传 null。
-     * @returns {Promise<{seq: number, line: string}>}
+     * @returns {Promise<{seq: number, line: string, written: boolean}>}
      */
     async appendSampleLine(sample) {
         this._ensureOpen();
+        if (this.quotaStopReason) return this._appendRejected();
         await this._rotateIfDue();
-        if (!this.active) await this._openNewSegment();
+        // 轮换中的封存可能因配额拒绝而转入安全停止。
+        if (this.quotaStopReason) return this._appendRejected();
+        if (!this.active) {
+            const opened = await this._openNewSegment();
+            if (!opened) return this._appendRejected();
+        }
         const seq = this.manifest.sequenceCounter + 1;
         const line = this._buildLine(sample, seq);
         const buffer = Buffer.from(line, "utf8");
@@ -267,7 +345,7 @@ class RecordingSession {
         this.active.samples += 1;
         this.active.bytes += buffer.length;
         this._markDirty();
-        return { seq, line };
+        return { seq, line, written: true };
     }
 
     /** 批量追加采样行。 */
@@ -319,7 +397,10 @@ class RecordingSession {
     /**
      * 封存活动段：先落盘并关闭 .part，再压缩为 .gz（临时文件 → fdatasync → 原子改名），
      * 改名成功后才删除原始 .part；任何一步失败都保留原始段并恢复可写状态。
+     * 注入配额管理器时，压缩临时文件创建前按"封口前段大小"预留空间，压缩成功后
+     * 以 .gz 实际大小 reconcile 校正；预留被拒绝时中止封存并转入安全停止（不抛出）。
      * @param {string} reason 封存原因（"size" | "time" | "manual" | "close" 等）
+     * @returns {Promise<object|null>} 封存条目；配额拒绝中止封存时为 null
      */
     async sealActiveSegment(reason = "manual") {
         if (!this.active) return null;
@@ -330,6 +411,19 @@ class RecordingSession {
         const gzFile = `${segment.name}.ndjson.gz`;
         const gzPath = path.join(this.sessionDir, gzFile);
         const tmpPath = `${gzPath}.tmp`;
+        if (this.quota) {
+            const reserved = await this._reserveQuota(segment.bytes);
+            if (!reserved) {
+                // 配额拒绝：恢复活动段并转入安全停止，原始段数据保持原样。
+                try {
+                    segment.fd = await openFd(segment.filePath, "a");
+                    this.active = segment;
+                } catch {
+                    // 重开失败：保持活动段为空，由调用方走恢复流程。
+                }
+                return null;
+            }
+        }
         try {
             await gzipFileTo(segment.filePath, tmpPath);
             await io.rename(tmpPath, gzPath);
@@ -364,6 +458,14 @@ class RecordingSession {
         this.manifest.activeSegment = null;
         this.manifest.quota.usedBytes = (this.manifest.quota.usedBytes || 0) + segment.bytes;
         await writeManifest(this.sessionDir, this.manifest);
+        if (this.quota) {
+            // 压缩成功后以磁盘实际用量（.gz 实际大小）校正统计；失败不影响封存结果。
+            try {
+                await this.quota.reconcile(this.sessionDir);
+            } catch {
+                // 校正失败由后续 reserve 的磁盘基准兜底。
+            }
+        }
         return entry;
     }
 
@@ -405,7 +507,21 @@ class RecordingSession {
             if (this.active) {
                 await this.flush();
                 if (status === "completed") {
-                    await this.sealActiveSegment("close");
+                    const sealed = await this.sealActiveSegment("close");
+                    if (!sealed && this.active) {
+                        // 封存被配额拒绝中止：转为中断语义，保留 .part 以便续录。
+                        status = "interrupted";
+                        const segment = this.active;
+                        await closeFd(segment.fd);
+                        this.active = null;
+                        this.manifest.activeSegment = {
+                            name: segment.name,
+                            file: segment.file,
+                            createdAtMs: segment.createdAtMs,
+                            samples: segment.samples,
+                            bytes: segment.bytes
+                        };
+                    }
                 } else {
                     const segment = this.active;
                     await closeFd(segment.fd);
@@ -454,6 +570,9 @@ class RecordingSession {
  * @param {string} [options.debuggerId]
  * @param {{maxMiB?: number, globalMaxMiB?: number}} [options.limits]
  * @param {object} [options.clock] 可注入时钟 {now, setTimeout, clearTimeout}
+ * @param {object} [options.quota] 可注入的配额管理器（createQuotaManager 返回值）；省略时不限配额
+ * @param {Function} [options.onQuotaExceeded] 配额拒绝回调 (reason, result) => Promise|void，
+ *   供上层把会话置为 "stopped-quota" 等安全停止状态
  * @param {number} [options.segmentMaxBytes] 测试用覆盖，默认 32 MiB
  * @param {number} [options.segmentMaxAgeMs] 测试用覆盖，默认 5 分钟
  * @param {number} [options.syncIntervalMs] 测试用覆盖，默认 1000
@@ -497,7 +616,9 @@ async function createSession(options = {}) {
         clock,
         segmentMaxBytes: options.segmentMaxBytes,
         segmentMaxAgeMs: options.segmentMaxAgeMs,
-        syncIntervalMs: options.syncIntervalMs
+        syncIntervalMs: options.syncIntervalMs,
+        quota: options.quota || null,
+        onQuotaExceeded: options.onQuotaExceeded || null
     });
     await session._openNewSegment();
     return session;
@@ -653,7 +774,8 @@ async function recoverSession(options = {}) {
 
 /**
  * 打开既有会话（先执行恢复流程），重新以追加模式打开活动段，可继续写入。
- * 选项与 recoverSession 相同，另支持 RecordingSession 的覆盖参数。
+ * 选项与 recoverSession 相同，另支持 RecordingSession 的覆盖参数
+ * （含可选的 quota 配额管理器与 onQuotaExceeded 回调注入）。
  * @returns {Promise<RecordingSession>}
  */
 async function openSession(options = {}) {
@@ -664,7 +786,9 @@ async function openSession(options = {}) {
         clock: options.clock || defaultClock,
         segmentMaxBytes: options.segmentMaxBytes,
         segmentMaxAgeMs: options.segmentMaxAgeMs,
-        syncIntervalMs: options.syncIntervalMs
+        syncIntervalMs: options.syncIntervalMs,
+        quota: options.quota || null,
+        onQuotaExceeded: options.onQuotaExceeded || null
     });
     if (report.manifest.activeSegment) {
         const file = report.manifest.activeSegment.file;
@@ -683,16 +807,367 @@ async function openSession(options = {}) {
     return session;
 }
 
+/** 固定时长的真实睡眠，用于跨进程锁重试；不依赖注入时钟，避免假时钟下死等。 */
+function sleepMs(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 递归统计目录实际磁盘占用（字节）；目录不存在按 0 处理，单个文件消失不计入。 */
+async function directorySizeBytes(dirPath) {
+    let entries;
+    try {
+        entries = await fsp.readdir(dirPath, { withFileTypes: true });
+    } catch (error) {
+        if (error.code === "ENOENT") return 0;
+        throw error;
+    }
+    let total = 0;
+    for (const entry of entries) {
+        const child = path.join(dirPath, entry.name);
+        if (entry.isDirectory()) {
+            total += await directorySizeBytes(child);
+        } else if (entry.isFile()) {
+            try {
+                total += (await fsp.stat(child)).size;
+            } catch {
+                // 并发删除等场景下文件消失：不计入。
+            }
+        }
+    }
+    return total;
+}
+
+/**
+ * 跨进程录制配额管理器（由 createQuotaManager 创建，不要直接 new）。
+ *
+ * 全局统计以磁盘为准：实例首次进入加锁临界区时扫描存储根下各工作区目录中的
+ * *.eprec 会话目录的实际大小建立基线，之后在锁内增量维护；进程崩溃后新实例
+ * 自动从磁盘重建，绝不依赖内存中的陈旧值。所有全局统计的修改都在
+ * <storageRoot>/quota.lock 的 wx 独占锁内完成，拿不到锁时按 50ms × 20 次
+ * 短暂重试，仍失败则返回 quota-lock-busy，绝不死等或死锁。
+ */
+class RecordingQuotaManager {
+    constructor({ storageRoot, maxBytes, globalMaxBytes, clock }) {
+        this.storageRoot = storageRoot;
+        this.maxBytes = maxBytes;
+        this.globalMaxBytes = globalMaxBytes;
+        this.clock = clock;
+        this._lockPath = path.join(storageRoot, QUOTA_LOCK_FILE);
+        this._initialized = false;
+        this._sessions = new Map(); // 绝对会话目录 → 已预留/实际字节
+        this._perWorkspace = new Map(); // 工作区哈希 → 字节
+        this._global = 0;
+    }
+
+    /** 会话目录所属的工作区键（storageRoot 下的第一级目录，即工作区哈希）。 */
+    _workspaceKeyFor(sessionDir) {
+        const relative = path.relative(this.storageRoot, sessionDir);
+        if (!relative || relative.startsWith("..")) return path.basename(sessionDir);
+        return relative.split(path.sep)[0] || path.basename(sessionDir);
+    }
+
+    _usageSnapshot(sessionDir, sessionBytes = this._sessions.get(sessionDir) || 0) {
+        return {
+            sessionDir,
+            sessionBytes,
+            globalBytes: this._global,
+            maxBytes: this.maxBytes,
+            globalMaxBytes: this.globalMaxBytes
+        };
+    }
+
+    /** 扫描存储根下各工作区目录中 *.eprec 会话目录的实际大小，产出全局统计基线。 */
+    async _scanDiskBaseline() {
+        const sessions = new Map();
+        const perWorkspace = new Map();
+        let global = 0;
+        let workspaceEntries = [];
+        try {
+            workspaceEntries = await fsp.readdir(this.storageRoot, { withFileTypes: true });
+        } catch (error) {
+            if (error.code !== "ENOENT") throw error;
+        }
+        for (const workspaceEntry of workspaceEntries) {
+            if (!workspaceEntry.isDirectory()) continue;
+            const workspaceDir = path.join(this.storageRoot, workspaceEntry.name);
+            let sessionEntries = [];
+            try {
+                sessionEntries = await fsp.readdir(workspaceDir, { withFileTypes: true });
+            } catch {
+                // 工作区目录读取失败：跳过，不阻塞其余目录的统计。
+                continue;
+            }
+            for (const sessionEntry of sessionEntries) {
+                if (!sessionEntry.isDirectory() || !sessionEntry.name.endsWith(".eprec")) continue;
+                const dir = path.join(workspaceDir, sessionEntry.name);
+                const bytes = await directorySizeBytes(dir);
+                sessions.set(dir, bytes);
+                perWorkspace.set(workspaceEntry.name, (perWorkspace.get(workspaceEntry.name) || 0) + bytes);
+                global += bytes;
+            }
+        }
+        return { sessions, perWorkspace, global };
+    }
+
+    /** 惰性初始化：仅在本实例尚未建立基线时扫描磁盘；并发路径下后完成者让步。 */
+    async _ensureInitialized() {
+        if (this._initialized) return;
+        const baseline = await this._scanDiskBaseline();
+        if (this._initialized) return; // 另一个并发路径已完成初始化
+        this._sessions = baseline.sessions;
+        this._perWorkspace = baseline.perWorkspace;
+        this._global = baseline.global;
+        this._initialized = true;
+    }
+
+    /** 读取某会话的统计；基线之后新建的会话按磁盘实际用量登记。 */
+    async _trackedSessionUsage(sessionDir) {
+        const known = this._sessions.get(sessionDir);
+        if (known !== undefined) return known;
+        const bytes = await directorySizeBytes(sessionDir);
+        this._sessions.set(sessionDir, bytes);
+        const workspaceKey = this._workspaceKeyFor(sessionDir);
+        this._perWorkspace.set(workspaceKey, (this._perWorkspace.get(workspaceKey) || 0) + bytes);
+        this._global += bytes;
+        return bytes;
+    }
+
+    /** 在全局统计上累加预留字节。 */
+    _addReserved(sessionDir, bytes) {
+        this._sessions.set(sessionDir, (this._sessions.get(sessionDir) || 0) + bytes);
+        const workspaceKey = this._workspaceKeyFor(sessionDir);
+        this._perWorkspace.set(workspaceKey, (this._perWorkspace.get(workspaceKey) || 0) + bytes);
+        this._global += bytes;
+    }
+
+    /**
+     * 获取跨进程锁（quota.lock 的 wx 独占创建）。
+     * 锁文件 mtime 超过 QUOTA_LOCK_STALE_MS 视为陈旧并接管；拿不到时按
+     * 50ms × QUOTA_LOCK_RETRY_LIMIT 短暂重试。
+     * @returns {Promise<Function|null>} 释放函数；null 表示锁繁忙
+     * @throws {Error} 存储根不可写等基础设施故障（调用方须转为错误对象）
+     */
+    async _acquireLock() {
+        for (let attempt = 0; attempt < QUOTA_LOCK_RETRY_LIMIT; attempt += 1) {
+            if (attempt > 0) await sleepMs(QUOTA_LOCK_RETRY_MS);
+            const token = `${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
+            let handle;
+            try {
+                handle = await fsp.open(this._lockPath, "wx");
+            } catch (error) {
+                if (error.code !== "EEXIST") throw error;
+                // 锁被占用：mtime 超时视为陈旧锁并接管，否则稍后重试。
+                let stale = false;
+                try {
+                    const stat = await fsp.stat(this._lockPath);
+                    stale = this.clock.now() - stat.mtimeMs > QUOTA_LOCK_STALE_MS;
+                } catch {
+                    continue; // 锁刚好被持有者释放，直接重试。
+                }
+                if (stale) {
+                    try {
+                        await fsp.unlink(this._lockPath);
+                    } catch {
+                        continue; // 接管失败（他人已接管），重试。
+                    }
+                }
+                continue;
+            }
+            try {
+                await handle.writeFile(`${token}\n`, "utf8");
+            } finally {
+                await handle.close();
+            }
+            let released = false;
+            return async () => {
+                if (released) return;
+                released = true;
+                try {
+                    // 仅当锁仍由本实例持有时才删除，避免误删接管者的新锁。
+                    const current = await fsp.readFile(this._lockPath, "utf8");
+                    if (current.trim() === token) await fsp.unlink(this._lockPath);
+                } catch {
+                    // 释放失败不影响主流程（陈旧锁检测会兜底）。
+                }
+            };
+        }
+        return null;
+    }
+
+    /** 在跨进程锁内执行全局统计的修改；返回 null 表示锁繁忙。 */
+    async _withLock(action) {
+        const release = await this._acquireLock();
+        if (!release) return null;
+        try {
+            await this._ensureInitialized();
+            return await action();
+        } finally {
+            await release();
+        }
+    }
+
+    /**
+     * 为某会话预留 bytes 字节。会话用量 + 请求字节超过单会话上限，或全局用量 +
+     * 请求字节超过全局上限时拒绝；拒绝不影响任何已写入数据（绝不截断、绝不循环覆盖）。
+     * @returns {Promise<{ok: boolean, granted?: number, reason?: string, usage?: object, error?: string}>}
+     */
+    async reserve(sessionDir, bytes) {
+        const dir = path.resolve(sessionDir);
+        if (!Number.isFinite(bytes) || bytes < 0) {
+            return { ok: false, reason: "quota-invalid-request", usage: this._usageSnapshot(dir) };
+        }
+        try {
+            const result = await this._withLock(async () => {
+                const used = await this._trackedSessionUsage(dir);
+                if (used + bytes > this.maxBytes) {
+                    return { ok: false, reason: "session-quota-exceeded", usage: this._usageSnapshot(dir) };
+                }
+                if (this._global + bytes > this.globalMaxBytes) {
+                    return { ok: false, reason: "global-quota-exceeded", usage: this._usageSnapshot(dir) };
+                }
+                this._addReserved(dir, bytes);
+                return { ok: true, granted: bytes, usage: this._usageSnapshot(dir) };
+            });
+            if (result) return result;
+            return { ok: false, reason: "quota-lock-busy", usage: this._usageSnapshot(dir) };
+        } catch (error) {
+            // 存储根不可写等基础设施故障以错误对象返回，绝不向写入路径抛出未处理异常。
+            return { ok: false, reason: "quota-unavailable", error: error.message, usage: this._usageSnapshot(dir) };
+        }
+    }
+
+    /** 归还某会话的预留（会话结束/封存后按实际用量校正）。 */
+    async release(sessionDir, bytes) {
+        const dir = path.resolve(sessionDir);
+        if (!Number.isFinite(bytes) || bytes < 0) {
+            return { ok: false, reason: "quota-invalid-request", usage: this._usageSnapshot(dir) };
+        }
+        try {
+            const result = await this._withLock(async () => {
+                const tracked = this._sessions.get(dir);
+                if (tracked !== undefined && bytes > 0) {
+                    const reduced = Math.max(0, tracked - bytes);
+                    const delta = tracked - reduced;
+                    this._sessions.set(dir, reduced);
+                    const workspaceKey = this._workspaceKeyFor(dir);
+                    this._perWorkspace.set(
+                        workspaceKey,
+                        Math.max(0, (this._perWorkspace.get(workspaceKey) || 0) - delta)
+                    );
+                    this._global = Math.max(0, this._global - delta);
+                }
+                return { ok: true, usage: this._usageSnapshot(dir) };
+            });
+            if (result) return result;
+            return { ok: false, reason: "quota-lock-busy", usage: this._usageSnapshot(dir) };
+        } catch (error) {
+            return { ok: false, reason: "quota-unavailable", error: error.message, usage: this._usageSnapshot(dir) };
+        }
+    }
+
+    /** 以实际磁盘用量校正某会话的统计（封存压缩后调用，磁盘为唯一事实来源）。 */
+    async reconcile(sessionDir) {
+        const dir = path.resolve(sessionDir);
+        try {
+            const result = await this._withLock(async () => {
+                const known = this._sessions.get(dir);
+                const actual = await directorySizeBytes(dir);
+                if (known === undefined) {
+                    // 基线建立后才出现的会话：直接登记实际用量。
+                    this._sessions.set(dir, actual);
+                    const workspaceKey = this._workspaceKeyFor(dir);
+                    this._perWorkspace.set(workspaceKey, (this._perWorkspace.get(workspaceKey) || 0) + actual);
+                    this._global += actual;
+                } else if (actual !== known) {
+                    const delta = actual - known;
+                    this._sessions.set(dir, actual);
+                    const workspaceKey = this._workspaceKeyFor(dir);
+                    this._perWorkspace.set(
+                        workspaceKey,
+                        Math.max(0, (this._perWorkspace.get(workspaceKey) || 0) + delta)
+                    );
+                    this._global = Math.max(0, this._global + delta);
+                }
+                return { ok: true, bytes: actual, usage: this._usageSnapshot(dir, actual) };
+            });
+            if (result) return result;
+            return { ok: false, reason: "quota-lock-busy", usage: this._usageSnapshot(dir) };
+        } catch (error) {
+            return { ok: false, reason: "quota-unavailable", error: error.message, usage: this._usageSnapshot(dir) };
+        }
+    }
+
+    /** 快照：{ perWorkspace: {wsHash: bytes}, global: bytes, limits: {maxBytes, globalMaxBytes} } */
+    async stats() {
+        await this._ensureInitialized();
+        return {
+            perWorkspace: Object.fromEntries(this._perWorkspace),
+            global: this._global,
+            limits: { maxBytes: this.maxBytes, globalMaxBytes: this.globalMaxBytes }
+        };
+    }
+
+    /** 判断某会话是否还能写入：返回 {allowed: boolean, reason?: string}。 */
+    async check(sessionDir) {
+        const dir = path.resolve(sessionDir);
+        try {
+            await this._ensureInitialized();
+            const sessionBytes = this._sessions.has(dir) ? this._sessions.get(dir) : await directorySizeBytes(dir);
+            if (sessionBytes >= this.maxBytes) {
+                return {
+                    allowed: false,
+                    reason: "session-quota-exceeded",
+                    usage: this._usageSnapshot(dir, sessionBytes)
+                };
+            }
+            if (this._global >= this.globalMaxBytes) {
+                return {
+                    allowed: false,
+                    reason: "global-quota-exceeded",
+                    usage: this._usageSnapshot(dir, sessionBytes)
+                };
+            }
+            return { allowed: true, usage: this._usageSnapshot(dir, sessionBytes) };
+        } catch (error) {
+            return { allowed: false, reason: "quota-unavailable", error: error.message };
+        }
+    }
+}
+
+/**
+ * 创建跨进程录制配额管理器。
+ * @param {{storageRoot?: string, maxMiB?: number, globalMaxMiB?: number, clock?: object, now?: Function}} options
+ *   storageRoot 必填（缺失时抛出）；maxMiB/globalMaxMiB 经 resolveRecordingLimits 收敛
+ *   （默认 1024/2048，即 1 GiB / 2 GiB）；clock/now 仅作为陈旧锁检测的时间源，省略时使用系统时钟。
+ * @returns {RecordingQuotaManager}
+ */
+function createQuotaManager(options = {}) {
+    if (!options.storageRoot) throw new Error("storageRoot is required");
+    const clock =
+        options.clock || (typeof options.now === "function" ? { ...defaultClock, now: options.now } : defaultClock);
+    const limits = resolveRecordingLimits({ maxMiB: options.maxMiB, globalMaxMiB: options.globalMaxMiB });
+    return new RecordingQuotaManager({
+        storageRoot: path.resolve(options.storageRoot),
+        maxBytes: limits.maxMiB * BYTES_PER_MIB,
+        globalMaxBytes: limits.globalMaxMiB * BYTES_PER_MIB,
+        clock
+    });
+}
+
 module.exports = {
     FORMAT_VERSION,
     MANIFEST_FILE,
     SEGMENT_MAX_AGE_MS,
     SEGMENT_MAX_BYTES,
     SYNC_INTERVAL_MS,
+    QUOTA_LOCK_FILE,
+    QUOTA_LOCK_STALE_MS,
     RecordingSession,
+    RecordingQuotaManager,
     createSession,
     openSession,
     recoverSession,
+    createQuotaManager,
     readManifest,
     resolveRecordingLimits,
     sessionDirFor,

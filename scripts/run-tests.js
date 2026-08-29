@@ -110,7 +110,8 @@ const allTests = [
     "test/fault-info.test.js",
     "test/write-authorization.test.js",
     "test/flash-skills.test.js",
-    "test/recording-storage.test.js"
+    "test/recording-storage.test.js",
+    "test/recording-quota.test.js"
 ];
 
 // 发布元数据一致性检查只在发布流程运行，日常提交不做版本/README 声明校验。
@@ -130,7 +131,9 @@ const qualityTests = [
     "test/svd-manager.test.js",
     "test/svd-peripheral.test.js",
     "test/debug-control.test.js",
-    "test/hil-runner.test.js"
+    "test/hil-runner.test.js",
+    "test/recording-storage.test.js",
+    "test/recording-quota.test.js"
 ];
 
 function run(args) {
