@@ -41,6 +41,8 @@ const { SvdManager } = require("./services/svdManager");
 const { SvdPeripheralService } = require("./services/svdPeripheralService");
 const { DebugControlService } = require("./services/debugControlService");
 const { resolveCortexToolchainForWorkspace } = require("./services/cortexToolchainService");
+const { createRecordingService } = require("./services/recordingService");
+const recorderSampler = require("./services/recorderSampler");
 const { externalizeWebviewHtml } = require("./webviewAssets");
 const fs = require("fs");
 const os = require("os");
@@ -160,6 +162,13 @@ class MainViewProvider {
         this._shutdownPromise = null;
         this._liveIntervalMs = 100;
         this._liveConsumers = new Set();
+        // 长录制（Task 3）：'recorder' 作为第三采样所有者；schema 随录制启停，占用与退避重连见下
+        this._recorderSchema = null;
+        this._recorderOccupations = new Set();
+        this._recorderReconnect = recorderSampler.createReconnectScheduler({
+            clock: recorderSampler.defaultClock,
+            onFire: () => { Promise.resolve(this._attemptRecorderReconnect()).catch(() => {}); }
+        });
         this._consumerTypesCache = null;
         this._agentReadSession = null;
         this._agentReadCancelled = false;
@@ -203,6 +212,32 @@ class MainViewProvider {
             cleanPath: cleanWindowsPath,
             t: (key, params) => this._t(key, params)
         });
+        // 长录制服务（Task 2）：不依赖图表面板生命周期；变量解析/ELF 哈希/硬件身份在此接线真实实现
+        this._recordingService = createRecordingService({
+            context,
+            resolveVariables: names => this._resolveRecordingVariables(names),
+            elfInfo: () => this._recordingElfInfo(),
+            hardwareInfo: () => this._recordingHardwareInfo(),
+            getSamplingInterval: () => this._liveIntervalMs
+        });
+        this._recordingService.onQuotaStop(() => this._handleRecordingSafeStop('quota'));
+        this._recordingService.onSafeStop(() => this._handleRecordingSafeStop('error'));
+        // VS Code commands：供 Task 5 的 UI 与 Agent Bridge 复用（与 recording.* 消息分支同一实现）
+        this._recordingCommands = [
+            vscode.commands.registerCommand('emberprobe.recording.start', params => this._startRecording(params || {})),
+            vscode.commands.registerCommand('emberprobe.recording.stop', () => this._stopRecording()),
+            vscode.commands.registerCommand('emberprobe.recording.status', () => this._recordingService.status())
+        ];
+        for (const disposable of this._recordingCommands) this._context.subscriptions.push(disposable);
+        // 扩展重启自动续录（Task 2）：接管恢复会话的固定 schema，采样恢复运行后数据自动续流；
+        // 不在激活时强制启动探针（避免后台抢占）。
+        this._recordingService.whenReady().then(status => {
+            if (!status || !status.recordingActive || this._recorderSchema) return;
+            this._adoptRecordingSchema(status);
+            this._liveConsumers.add('recorder');
+            if (this._liveSession) this._liveSession.setWatch(this._activeReadPlan());
+            this._postConsumerStatuses({});
+        }).catch(() => {});
         this._openOcdStatusService = new OpenOcdStatusService({
             vscode,
             context,
@@ -533,51 +568,62 @@ class MainViewProvider {
                 vscode.window.showWarningMessage(this._t('msg.agentReadBusy'));
                 return false;
             }
-            // 下载前自动停止实时采样以释放探针；短暂等待确保 OpenOCD 进程退出、USB 句柄释放
-            if (this._liveWatchRunning) {
-                this.stopLiveWatch();
-                await new Promise(resolve => setTimeout(resolve, 250));
-            }
-            if (this._chipInfoRunning) {
-                vscode.window.showWarningMessage(this._t('msg.chipBusyForDownload'));
-                return false;
-            }
-            this._downloadRunning = true;
-            const configuredExecutable = vscode.workspace.getConfiguration('emberprobe').get('openocdPath', 'openocd');
-            const executable = await this._resolveOpenOcdPath(configuredExecutable);
-            if (!executable) { this._downloadRunning = false; return false; }
-            this._recentProgress = [];
+            // 录制活跃时下载是显式占用（探针被烧录接管）：结束后立即恢复采样，不等退避计时器
+            const recorderOwned = this._recorderSchema != null;
+            if (recorderOwned) this._noteRecorderOccupation('download');
             try {
-                console.log('主进程执行下载程序命令');
-                let elfPath = this._context.workspaceState.get(CACHE_KEYS.elfPath);
-                const debuggerCfg = this._context.workspaceState.get(CACHE_KEYS.debugger);
-                const mcuCore = this._context.workspaceState.get(CACHE_KEYS.mcuCore);
-                if (!elfPath || !debuggerCfg || !mcuCore) {
-                    vscode.window.showErrorMessage(this._t('msg.configIncomplete'));
-                    return false;
-                }
-                const cleanElfPath = cleanWindowsPath(elfPath);
-                const { cwd } = this._commandContext(resource);
-                await this._flashService.download(vscode, { executable, elf: cleanElfPath, probe: debuggerCfg, target: mcuCore, cwd }, event => {
-                    // 缓冲最近几条进度，视图未打开或刷新时可回放，避免进度静默丢失
-                    const message = { type: 'openocdProgress', ...event };
-                    this._recentProgress.push(message);
-                    if (this._recentProgress.length > 6) this._recentProgress.shift();
-                    this._webviewView?.webview.postMessage(message);
-                });
-                vscode.window.showInformationMessage(this._t('msg.downloadSuccess'));
-                return true;
-            }
-            catch (err) {
-                const errorMsg = err.message;
-                console.error('固件下载失败：', errorMsg);
-                vscode.window.showErrorMessage(this._t('msg.downloadFailed', { error: errorMsg }));
-                throw err; // 上抛给消息分发器，向 Webview 反馈 commandError 而非 commandSuccess
-            }
-            finally {
-                this._downloadRunning = false;
+                return await this._runDownload(resource);
+            } finally {
+                if (recorderOwned) this._releaseRecorderOccupation('download');
             }
         };
+    }
+    // 下载执行体：mcu-vscode.download 的 busy 检查与录制占用包装之后执行
+    async _runDownload(resource) {
+        // 下载前自动停止实时采样以释放探针；短暂等待确保 OpenOCD 进程退出、USB 句柄释放
+        if (this._liveWatchRunning) {
+            this.stopLiveWatch({ force: true });
+            await new Promise(resolve => setTimeout(resolve, 250));
+        }
+        if (this._chipInfoRunning) {
+            vscode.window.showWarningMessage(this._t('msg.chipBusyForDownload'));
+            return false;
+        }
+        this._downloadRunning = true;
+        const configuredExecutable = vscode.workspace.getConfiguration('emberprobe').get('openocdPath', 'openocd');
+        const executable = await this._resolveOpenOcdPath(configuredExecutable);
+        if (!executable) { this._downloadRunning = false; return false; }
+        this._recentProgress = [];
+        try {
+            console.log('主进程执行下载程序命令');
+            let elfPath = this._context.workspaceState.get(CACHE_KEYS.elfPath);
+            const debuggerCfg = this._context.workspaceState.get(CACHE_KEYS.debugger);
+            const mcuCore = this._context.workspaceState.get(CACHE_KEYS.mcuCore);
+            if (!elfPath || !debuggerCfg || !mcuCore) {
+                vscode.window.showErrorMessage(this._t('msg.configIncomplete'));
+                return false;
+            }
+            const cleanElfPath = cleanWindowsPath(elfPath);
+            const { cwd } = this._commandContext(resource);
+            await this._flashService.download(vscode, { executable, elf: cleanElfPath, probe: debuggerCfg, target: mcuCore, cwd }, event => {
+                // 缓冲最近几条进度，视图未打开或刷新时可回放，避免进度静默丢失
+                const message = { type: 'openocdProgress', ...event };
+                this._recentProgress.push(message);
+                if (this._recentProgress.length > 6) this._recentProgress.shift();
+                this._webviewView?.webview.postMessage(message);
+            });
+            vscode.window.showInformationMessage(this._t('msg.downloadSuccess'));
+            return true;
+        }
+        catch (err) {
+            const errorMsg = err.message;
+            console.error('固件下载失败：', errorMsg);
+            vscode.window.showErrorMessage(this._t('msg.downloadFailed', { error: errorMsg }));
+            throw err; // 上抛给消息分发器，向 Webview 反馈 commandError 而非 commandSuccess
+        }
+        finally {
+            this._downloadRunning = false;
+        }
     }
     async _configurationSnapshot() {
         const snapshot = this._configurationStore.snapshot();
@@ -1071,6 +1117,8 @@ class MainViewProvider {
                 this._agentReadSession = session;
                 temporary = true;
                 source = 'temporary-probe';
+                // 临时探针会话是显式占用：结束后立即恢复录制采样（不等退避计时器）
+                this._noteRecorderOccupation('agentRead');
             } catch (error) {
                 this._agentReadRunning = false;
                 throw error;
@@ -1097,6 +1145,7 @@ class MainViewProvider {
                     this._postAgentSampling(false, key, { total });
                 }
                 this._agentReadCancelled = false;
+                this._releaseRecorderOccupation('agentRead');
             }
         }
     }
@@ -1523,6 +1572,8 @@ class MainViewProvider {
             canRead: this._liveWatchRunning,
             canWrite: this._liveWatchRunning,
             source: this._liveWatchRunning ? 'openocd' : 'none',
+            // 长录制状态（Task 3）：started/stopped/gap/retry/quota/error 合并进 liveStatus 通道
+            recording: this._recordingStatusSnapshot(),
             ...p,
             error
         };
@@ -1605,6 +1656,16 @@ class MainViewProvider {
             const writeItems = this._context.workspaceState.get(CACHE_KEYS.sidebarWriteList) || [];
             lists.push(validation.normalizeWatchList(writeItems, this.readElfSymbols().symbols));
         } catch (e) { /* ELF 不可用时忽略写入列表 */ }
+        // 长录制：录制期间变量集合固定，录制 schema 始终并入合并读取计划，
+        // 图表/侧栏变量增删不得把录制变量从计划中挤掉（按 name 去重，宽度取最大）
+        if (this._recorderSchema && Array.isArray(this._recorderSchema.variables)) {
+            lists.push(this._recorderSchema.variables.map(v => ({
+                name: v.name,
+                type: v.type,
+                address: Number(v.address),
+                size: v.size
+            })));
+        }
         return buildActiveReadPlan(lists, elfSymbols);
     }
     // 各消费者对每个变量的观察类型，用于把同一份原始字节按各自类型解码后分别推送。
@@ -1658,6 +1719,8 @@ class MainViewProvider {
         );
         if (sidebar.scalarSamples.length) this._webviewView?.webview.postMessage({ type: 'liveSample', samples: sidebar.scalarSamples, t });
         if (sidebar.compositeSamples.length) this._webviewView?.webview.postMessage({ type: 'liveCompositeSample', samples: sidebar.compositeSamples, t });
+        // 长录制馈送：录制按自身 schema 独立解码并优先保留精确 valueText，与 Webview 解码路径无关
+        this._feedRecorderSamples(samples, t);
     }
 
     async _refreshSamplingPlan() {
@@ -1745,8 +1808,9 @@ class MainViewProvider {
             this._postConsumerStatuses({ key: 'live.needVar' });
             return;
         }
-        this._liveConsumers.add('graph');
-        this._liveConsumers.add('sidebar');
+        // 采样所有者：graph/sidebar 共用采样；录制器以 'recorder' 身份独立持有所有权
+        const ownersToAdd = consumer === 'recorder' ? ['recorder'] : ['graph', 'sidebar'];
+        for (const owner of ownersToAdd) this._liveConsumers.add(owner);
         if (this._liveWatchRunning && this._liveSession) {
             this._liveSession.setWatch(this._activeReadPlan());
             if (intervalMs !== undefined) this._setLiveInterval(intervalMs);
@@ -1774,7 +1838,12 @@ class MainViewProvider {
                 if (this._liveSession !== session) return;
                 this._liveSession = null;
                 this._liveWatchRunning = false;
-                this._liveConsumers.clear();
+                if (this._liveConsumers.has('recorder')) {
+                    // 录制器仍是所有者：保持所有权，写 gap-start 内部事件行并按退避序列持续重连
+                    this._beginRecorderReconnect();
+                } else {
+                    this._liveConsumers.clear();
+                }
                 this._postConsumerStatuses({ key: err && err.i18nKey, params: err && err.i18nParams, message: (err && err.message) || String(err) }, true);
             }
         });
@@ -1793,13 +1862,22 @@ class MainViewProvider {
                 this._liveSession = null;
                 this._liveWatchRunning = false;
             }
-            this._liveConsumers.clear();
+            // 录制器仍是所有者时保留其所有权（退避重连继续尝试），仅清除显示侧消费者
+            if (!this._liveConsumers.has('recorder')) this._liveConsumers.clear();
             this._postConsumerStatuses({ key: error.i18nKey, params: error.i18nParams, message: error.message }, true);
             throw error;
         }
     }
     stopLiveWatch(options = {}) {
         const preserveIntent = !!options.preserveIntent;
+        // 长录制所有者语义：'recorder' 在所有者集合时，图表/侧栏的停止请求不能终止活动录制
+        // （状态仍显示采样中，来源标注 recorder 维持）；下载/调试切换等探针占用走 force。
+        if (!options.force && this._liveConsumers.has('recorder')) {
+            this._liveConsumers.delete('graph');
+            this._liveConsumers.delete('sidebar');
+            this._postConsumerStatuses({ key: 'sb.sampling', recording: this._recordingStatusSnapshot() });
+            return null;
+        }
         let stopped = null;
         this._liveConsumers.clear();
         if (this._liveSession) { try { stopped = this._liveSession.stop(); } catch (e) { /* ignore */ } this._liveSession = null; }
@@ -1816,6 +1894,226 @@ class MainViewProvider {
     stopLiveWatchIfRunning() {
         if (this._liveWatchRunning) this.stopLiveWatch({ preserveIntent: true });
     }
+
+    // ------------------------------------------------ 长录制采样集成（Task 3）
+
+    // 长录制变量解析：支持成员路径展开为标量叶子；返回固定 schema 列 {name, type, address, size}
+    async _resolveRecordingVariables(names) {
+        this._elfService.invalidate();
+        const elfResult = this.readElfSymbols();
+        const byName = new Map(elfResult.symbols.map(symbol => [symbol.name, symbol]));
+        const resolved = [];
+        for (const rawName of Array.isArray(names) ? names : []) {
+            const parsed = elfSymbols.parseMemberPath(rawName);
+            const baseName = parsed ? parsed.base : rawName;
+            const symbol = byName.get(baseName);
+            if (!symbol) throw Object.assign(new Error(`Variable not found in current ELF: ${rawName}`), { code: 'VARIABLE_NOT_FOUND' });
+            if (symbol.isComposite) {
+                if (!symbol.compositeLayout) throw Object.assign(new Error(`Composite variable has no DWARF layout: ${rawName}`), { code: 'UNSUPPORTED_VARIABLE' });
+                const leaves = elfSymbols.expandCompositeLeaves(symbol, symbol.compositeLayout, parsed || null);
+                if (!leaves.length) throw Object.assign(new Error(`Invalid composite member path: ${rawName}`), { code: 'INVALID_VARIABLE_PATH' });
+                for (const leaf of leaves) resolved.push({ name: leaf.path, address: leaf.address, size: leaf.size, type: leaf.type });
+            } else {
+                if (parsed && parsed.segments.length) throw Object.assign(new Error(`${rawName} is not a composite variable; member paths are not applicable`), { code: 'INVALID_VARIABLE_PATH' });
+                if (!symbol.watchType) throw Object.assign(new Error(`Variable is not a supported scalar: ${rawName}`), { code: 'UNSUPPORTED_VARIABLE' });
+                const [item] = elfSymbols.resolveVariableRequests(elfResult.symbols, [{ name: rawName }]);
+                resolved.push({ name: item.name, type: item.type, address: `0x${item.address.toString(16).toUpperCase()}`, size: item.size });
+            }
+        }
+        if (!resolved.length) throw Object.assign(new Error('No recordable variables resolved'), { code: 'NO_VARIABLES' });
+        return resolved;
+    }
+
+    // 长录制身份：ELF 文件 SHA-256（跨重启匹配续录用）
+    async _recordingElfInfo() {
+        const elfResult = this.readElfSymbols();
+        return { sha256: elfResult.elf.sha256, mtimeMs: elfResult.elf.mtimeMs };
+    }
+
+    // 长录制硬件身份：取跨重启稳定的调试器/MCU 配置（workspaceState 持久化字段）
+    async _recordingHardwareInfo() {
+        return {
+            mcu: this._context.workspaceState.get(CACHE_KEYS.mcuCore) || null,
+            probe: this._context.workspaceState.get(CACHE_KEYS.debugger) || null
+        };
+    }
+
+    // 从 recordingService 快照接管活动会话的固定 schema（启动录制或扩展重启续录用）
+    _adoptRecordingSchema(status) {
+        this._recorderSchema = {
+            variables: (status.fixedVariables || []).map(v => ({ name: v.name, type: v.type, address: v.address, size: v.size })),
+            startTimeMs: status.createdAtMs != null ? status.createdAtMs : Date.now(),
+            source: 'recorder'
+        };
+        return this._recorderSchema;
+    }
+
+    // recording.* 消息分支：Webview 消息与 VS Code commands（emberprobe.recording.*）共用同一实现
+    async _handleRecordingMessage(message, post) {
+        try {
+            if (message.type === 'recording.start') await this._startRecording(message);
+            else if (message.type === 'recording.stop') await this._stopRecording();
+            // recording.status：直接回发当前快照
+            post({ type: 'recordingStatus', action: message.type, ok: true, recording: this._recordingStatusSnapshot() });
+        } catch (error) {
+            post({ type: 'recordingError', action: message.type, code: error.code || 'RECORDING_FAILED', message: error.message || String(error) });
+        }
+    }
+
+    // 启动长录制：解析变量冻结 schema；'recorder' 加入所有者集合，采样未运行则自动启动，
+    // 已运行则仅把录制变量并入读取计划（图表变量修改只影响显示）。采样启动失败不回滚录制。
+    async _startRecording(params = {}) {
+        const names = Array.isArray(params.names) ? params.names.map(name => String(name || '').trim()).filter(Boolean) : [];
+        if (!names.length) throw Object.assign(new Error('No variables supplied for recording'), { code: 'NO_VARIABLES' });
+        const intervalMs = params.intervalMs === undefined ? undefined : Number(params.intervalMs);
+        if (intervalMs !== undefined && (!Number.isFinite(intervalMs) || intervalMs <= 0)) {
+            throw Object.assign(new Error('intervalMs must be a positive number'), { code: 'INVALID_INTERVAL' });
+        }
+        const status = await this._recordingService.start({ names, intervalMs });
+        if (!status.recordingActive) {
+            // 创建即被配额/写错误安全停止：不接管采样，状态经 liveStatus 通道透出
+            this._postConsumerStatuses({ recording: this._recordingStatusSnapshot() });
+            return status;
+        }
+        this._recorderReconnect.reset();
+        this._adoptRecordingSchema(status);
+        this._liveConsumers.add('recorder');
+        try {
+            if (this._liveSession) {
+                this._liveSession.setWatch(this._activeReadPlan());
+            } else if (this._debugBridge.hasSession) {
+                // 调试会话采样路径（DAP/托管 runtime）：刷新意图与读取计划，把录制变量并入
+                await this._refreshSamplingPlan();
+            } else {
+                await this.startLiveWatch(undefined, intervalMs, 'recorder');
+            }
+        } catch (error) {
+            // 采样启动失败不回滚录制：退避重连持续尝试，恢复后自动续录
+            this._ensureRecorderReconnect();
+        }
+        this._postConsumerStatuses({ key: 'sb.sampling' });
+        return this._recordingService.status();
+    }
+
+    // 停止长录制：封口会话并释放 recorder 所有权（无其他所有者时停止采样）
+    async _stopRecording() {
+        const status = await this._recordingService.stop();
+        this._handleRecordingEnded();
+        return status;
+    }
+
+    // 录制结束（用户停止/配额/写错误）：移除 recorder 所有权并取消挂起的重连计时器；
+    // recorder 是唯一所有者时停止采样，否则显示侧采样继续。
+    _handleRecordingEnded() {
+        this._recorderSchema = null;
+        this._recorderReconnect.cancel();
+        const remaining = recorderSampler.consumersAfterRecorderRelease(this._liveConsumers);
+        this._liveConsumers.clear();
+        for (const owner of remaining) this._liveConsumers.add(owner);
+        if (remaining.size === 0 && (this._liveWatchRunning || this._liveSession)) {
+            this.stopLiveWatch({ force: true });
+        } else {
+            this._postConsumerStatuses({});
+        }
+    }
+
+    // 配额/写错误安全停止回调（recordingService 闩锁后异步封口会话）
+    _handleRecordingSafeStop(kind) {
+        this._handleRecordingEnded();
+        this._postConsumerStatuses({ message: kind === 'quota' ? 'recording stopped: quota exceeded' : 'recording stopped: write error' }, true);
+    }
+
+    // 录制状态快照（同步）：合并进 liveStatus 通道，Task 5 UI 消费
+    _recordingStatusSnapshot() {
+        try {
+            const status = this._recordingService.status();
+            return {
+                status: status.status,
+                recordingId: status.recordingId || null,
+                recordingActive: !!status.recordingActive,
+                rows: status.rows || 0,
+                bytes: status.bytes || 0,
+                gaps: status.gaps || 0,
+                retry: status.retries || null,
+                quota: status.quota || null,
+                samplingPaused: !!status.samplingPaused,
+                gapActive: !!status.gapActive,
+                occupations: status.occupations || []
+            };
+        } catch (error) {
+            return { status: 'none', recordingActive: false, error: error.message };
+        }
+    }
+
+    // 录制行 src 标注：实际采样路径归属（graph/sidebar 优先；仅录制器拥有采样时标 recorder）
+    _recorderSampleSource() {
+        return recorderSampler.recorderSampleSource(this._liveConsumers);
+    }
+
+    // 统一采样入口的录制馈送：写队列高水位/安全停止时暂停喂入，排空后自动恢复
+    _feedRecorderSamples(samples, t) {
+        const schema = this._recorderSchema;
+        if (!schema) return;
+        const feed = recorderSampler.recorderFeedSchema(schema, {
+            paused: this._recordingService.shouldPauseSampling(),
+            source: this._recorderSampleSource()
+        });
+        if (!feed) return;
+        const built = recorderSampler.buildRecorderSample(feed, samples, t);
+        if (!built) return;
+        void this._recordingService.ingestSample(built.values, built.meta);
+    }
+
+    // 显式占用（下载/调试切换/芯片信息/agent 临时会话）：登记到 recordingService 并挂起退避重连
+    _noteRecorderOccupation(kind) {
+        if (!kind) return;
+        this._recorderOccupations.add(kind);
+        this._recordingService.noteOccupation(kind);
+        this._recorderReconnect.cancel();
+    }
+
+    // 释放显式占用：全部释放后若录制仍活跃且采样未运行 → 立即重连（不等待退避计时器）
+    _releaseRecorderOccupation(kind) {
+        if (!kind) return;
+        this._recorderOccupations.delete(kind);
+        this._recordingService.releaseOccupation(kind);
+        if (this._recorderOccupations.size > 0) return;
+        if (!this._recorderSchema) return;
+        if (this._liveWatchRunning || this._liveSession) return;
+        this._recorderReconnect.retryNow();
+    }
+
+    // 探针断连且录制器仍是所有者：写 gap-start 内部事件行并按退避序列调度重连
+    _beginRecorderReconnect() {
+        void this._recordingService.noteProbeDisconnected();
+        this._ensureRecorderReconnect();
+    }
+
+    // 确保有挂起的退避重连（已有则不重复调度）
+    _ensureRecorderReconnect() {
+        if (!this._recorderSchema || this._recorderReconnect.pending) return;
+        const info = this._recorderReconnect.schedule();
+        void this._recordingService.noteRetryScheduled({ attempt: info.attempt, nextAtMs: info.nextAtMs });
+    }
+
+    // 退避重连尝试：复用 startLiveWatch 的启动路径（托管/独立由现有逻辑决定）；
+    // 成功写 gap-end 并复位退避序列；失败排下一档退避并上报 retry 状态。
+    async _attemptRecorderReconnect() {
+        if (!this._recorderSchema) return;
+        if (this._recorderOccupations.size > 0) return;
+        if (this._liveWatchRunning || this._liveSession) return;
+        try {
+            await this.startLiveWatch(undefined, undefined, 'recorder');
+            this._recorderReconnect.reset();
+            void this._recordingService.noteProbeReconnected();
+            this._postConsumerStatuses({ key: 'sb.sampling' });
+        } catch (error) {
+            if (!this._recorderSchema) return;
+            const info = this._recorderReconnect.schedule();
+            void this._recordingService.noteRetryScheduled({ attempt: info.attempt, nextAtMs: info.nextAtMs });
+            this._postConsumerStatuses({ message: error.message });
+        }
+    }
     async prepareForCortexDebug(folder, config) {
         this._debugBridge.setWorkspace(folder || this._commandContext().folder);
         const token = config?.__emberprobeManagedToken;
@@ -1828,8 +2126,16 @@ class MainViewProvider {
         const agentStopped = this.stopAgentReadIfRunning();
         if (agentStopped) await agentStopped;
         if (this._liveWatchRunning || this._liveSession) {
-            const stopped = this.stopLiveWatch({ preserveIntent: true });
-            if (stopped) await stopped;
+            // 调试切换是显式占用（探针被 Cortex-Debug 接管）：强制停采样，结束后由
+            // restoreSamplingAfterDebug 恢复；恢复失败时录制退避重连继续尝试。
+            const recorderOwned = this._recorderSchema != null;
+            if (recorderOwned) this._noteRecorderOccupation('debug');
+            try {
+                const stopped = this.stopLiveWatch({ force: true, preserveIntent: true });
+                if (stopped) await stopped;
+            } finally {
+                if (recorderOwned) this._releaseRecorderOccupation('debug');
+            }
             this._postConsumerStatuses({ mode: 'debug-running-waiting', key: 'live.debugWaiting', source: 'dap', canRead: false, canWrite: false, snapshotReady: false });
         } else if (this._samplingIntent) {
             this._postConsumerStatuses({ mode: 'debug-running-waiting', key: 'live.debugWaiting', source: 'dap', snapshotReady: false });
@@ -1880,6 +2186,8 @@ class MainViewProvider {
         try {
             await this.startLiveWatch(undefined, this._liveIntervalMs, 'restore');
         } catch (error) {
+            // 录制仍活跃时退避重连接手（探针可能被其他进程占用或已断开）
+            if (this._recorderSchema) this._ensureRecorderReconnect();
             this._postConsumerStatuses({ mode: 'restore-failed', key: error.i18nKey, message: error.message, source: 'none' }, true);
         }
     }
@@ -1895,7 +2203,10 @@ class MainViewProvider {
                 try { await this._debugBridge.waitForState(status => status.state === 'none', 1500); } catch { /* bounded shutdown */ }
             }
             await this._stopManagedDebugServer();
-            const stopped = this.stopLiveWatch();
+            // 扩展宿主退出：强制停采样会话（录制会话保留在磁盘上，重启后由 Task 2 恢复续录）；
+            // 挂起的退避重连计时器一并取消。
+            this._recorderReconnect.cancel();
+            const stopped = this.stopLiveWatch({ force: true });
             if (stopped) await stopped;
             this.disposeDebugBridge();
             const agentStopped = this.stopAgentReadIfRunning();
@@ -1926,8 +2237,14 @@ class MainViewProvider {
         this._chipInfoService.sync(post);
     }
     // 通过 OpenOCD 一次性读取芯片基本信息；与下载/实时查看/调试互斥（探针同一时刻只能被一个进程占用）
+    // 录制活跃时是显式占用：结束后立即恢复采样（不等退避计时器）
     async readChipInfoAction(forAgent = false) {
-        return this._chipInfoService.read(forAgent);
+        this._noteRecorderOccupation('chipInfo');
+        try {
+            return await this._chipInfoService.read(forAgent);
+        } finally {
+            this._releaseRecorderOccupation('chipInfo');
+        }
     }
     // 将芯片信息读取的原始 OpenOCD 命令与输出写入输出面板，便于诊断（如 ID/UID/Flash 读取异常）
     _writeChipDiagnostics(diag, info) {
@@ -2078,6 +2395,13 @@ class MainViewProvider {
                     } catch (error) {
                         this._postConsumerStatuses({ key: error.i18nKey, params: error.i18nParams, message: error.message }, true);
                     }
+                    break;
+                }
+                case 'recording.start':
+                case 'recording.stop':
+                case 'recording.status': {
+                    // 长录制消息分支（Task 5 UI 对接）；错误码按现有风格回报
+                    await this._handleRecordingMessage(message, m => webviewView.webview.postMessage(m));
                     break;
                 }
                 case 'readChipInfo': {
