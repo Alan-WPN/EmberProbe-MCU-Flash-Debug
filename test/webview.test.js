@@ -127,6 +127,7 @@ assert.ok(panel.includes('snapDraggedRangeEdges();setWindowCustom()') && panel.i
 assert.ok(panel.includes('startPinned:false') && panel.includes("else if(chartState.startPinned)chartState.x={min:next.min,max:next.max}"), "simultaneously pinned timeline endpoints should expand instead of shifting the left edge");
 assert.ok(panel.includes("if(edge==='min'") && panel.includes("if(edge==='max'") && panel.includes('chartState.startPinned=chartState.x.min===chartState.bounds.min'), "timeline endpoint handles should snap and retain their edge state independently");
 assert.ok(panel.includes('function beginTimelineEndpoint(edge)') && panel.includes('chartState.follow=!chartState.endpointDrag'), "live following should remain paused throughout an endpoint-handle drag");
+assert.ok(panel.includes('samplingOrigin') && panel.includes("chartAxisStart').textContent=formatElapsed(chartState.bounds.min-origin)") && panel.includes("chartAxisEnd').textContent=formatElapsed(chartState.bounds.max-origin)"), "rolling chart buffers should retain elapsed sampling-time labels instead of resetting the visible left edge to 00:00");
 assert.ok(panel.includes("canvas.addEventListener('wheel'") && panel.includes("region==='plot'||region==='x'"), "wheel input should zoom the plot and X axis continuously");
 assert.ok(panel.includes("region==='plot'||region==='y'") && panel.includes('VP.zoomCentered(chartState.y'), "Y zoom should remain centered");
 assert.ok(panel.includes("e.button!==2") && panel.includes("canvas.addEventListener('contextmenu'"), "right-button dragging should adjust the waveform without opening a context menu");
@@ -142,11 +143,11 @@ assert.ok(panel.includes('window.__BUILD_CSV__=function buildCsv') && panel.incl
 assert.ok(panel.includes('id="exportOverlay"') && panel.includes('id="exportSeries"') && panel.includes('name="exportRange"'), "CSV export should offer series and time-range selection");
 assert.ok(panel.includes('id="exportFromRange"') && panel.includes('id="exportToRange"') && panel.includes('id="exportRangeFill"'), "custom CSV ranges should use a dual-handle timeline");
 assert.ok(!panel.includes('type="datetime-local"'), "custom CSV ranges should no longer use datetime text fields");
-assert.ok(panel.includes('exportOpenedAt=Date.now()') && panel.includes("exportAxisStart').textContent='00:00'"), "the export timeline should end at dialog-open time and start at 00:00");
+assert.ok(panel.includes("type:'samplingArchiveInfo'") && panel.includes('exportOpenedAt=last') && panel.includes("exportAxisStart').textContent='00:00'"), "the export timeline should use the complete archive bounds instead of the chart buffer");
 assert.ok(panel.includes('class="export-custom disabled"') && panel.includes("classList.toggle('disabled',!enabled)"), "the export timeline should remain visible but disabled outside custom mode");
 assert.ok(panel.includes('.export-timeline:before') && panel.includes('repeating-linear-gradient(90deg') && panel.includes('height:26px'), "the export timeline should use a long editing-track style with time ticks");
 assert.ok(panel.includes('width:10px;height:34px') && panel.includes('border-radius:2px'), "timeline trim handles should be tall rectangular controls");
-assert.ok(panel.includes("m.type==='exportCsvResult'") && panel.includes("seriesCount:selected.length,rowCount:rows"), "CSV export should report saved series and row counts");
+assert.ok(panel.includes("m.type==='exportCsvResult'") && panel.includes("names:selected.map") && panel.includes('fromMs:opts.from,toMs:opts.to'), "CSV export should send archive series and range selection to the extension host");
 assert.ok(panel.includes("lw.noDataToExport"), "exporting without data should hint instead of writing a file");
 assert.ok(panel.includes('html,body{width:100%;height:100%;overflow:hidden}'), "panel should fit its webview without page scrolling");
 assert.ok(panel.includes('card.append(rm,sw,main,sel)'), "remove button should be the first control in each variable card");

@@ -26,10 +26,10 @@ The sidebar lists all global/static variables of the current ELF; click a variab
 
 - Type support: scalars prefer DWARF type info and support `u8/i8/u16/i16/u32/i32/f32/u64/i64/f64`; structs, unions, and arrays can be expanded to select scalar leaves.
 - 64-bit precision: `u64/i64` charts use approximate Number values outside ±2^53; the sidebar, CSV, and Agent results prefer the exact decimal `valueText`.
-- CSV export: select any buffered series, including hidden curves. The editing-style dual-handle timeline stays visible but disabled and gray outside Custom mode; Custom defaults to the full buffer and ends when the dialog is opened.
+- CSV export: sampling automatically writes the complete history to a temporary archive, with no separate recording step. Export selected variables and time ranges at any time; internal data is deleted when the extension exits.
 - Live writes: the sidebar can add scalars with reliable DWARF types in ELF writable sections to a write list; writes are enabled only while sampling is active and are verified by reading the value back after each write.
 - Limits: supports only Cortex-M and global/static variables at fixed addresses; sampling bandwidth is limited (~10–50 Hz). Multiple panels share sampling start/stop and interval state; memory use grows linearly with panel count, with `maxSamples` applied per panel.
-- Related settings: `emberprobe.tclPort`, `emberprobe.sampleIntervalMs`, `emberprobe.maxSamples`.
+- Related settings: `emberprobe.tclPort`, `emberprobe.sampleIntervalMs`, `emberprobe.maxSamples`, `emberprobe.samplingArchiveMaxMiB`.
 
 
 ## Agent Skills
@@ -44,7 +44,6 @@ The sidebar lists all global/static variables of the current ELF; click a variab
 - `mcu-flash-verify`: reads target Flash and compares it with the loadable contents of the current ELF.
 - `mcu-peripheral-debug`: parses the workspace SVD, reads and decodes paused peripheral registers/fields, and performs safe writes after a fresh one-time confirmation for every request.
 - `mcu-debug-control`: starts, stops, and controls Cortex-Debug sessions, including pause/continue/stepping/restart plus source-line and function breakpoints.
-- `mcu-recording`: starts, inspects, and stops long-running recordings, streams a recording session to a workspace CSV export (optionally purging the internal data after success), and deletes recordings after explicit confirmation.
 
 ## Development & Build
 

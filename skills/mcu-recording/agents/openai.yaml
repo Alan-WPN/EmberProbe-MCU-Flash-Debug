@@ -1,4 +1,0 @@
-interface:
-  display_name: "MCU Recording"
-  short_description: "Record, export, and manage long MCU variable recordings"
-  default_prompt: "Use $mcu-recording to start, inspect, stop, export, or delete long-running MCU variable recordings through EmberProbe. Always report the workspace-relative export path first, and never pass --purge without the user confirming that unselected data will be discarded."

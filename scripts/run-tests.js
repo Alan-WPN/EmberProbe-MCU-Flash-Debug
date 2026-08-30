@@ -36,6 +36,7 @@ const sourceFiles = [
     "src/services/elfService.js",
     "src/services/openocdStatusService.js",
     "src/services/skillStatusService.js",
+    "src/services/feedbackPromptService.js",
     "src/services/chipInfoService.js",
     "src/services/liveWatchService.js",
     "src/services/debugSessionBridge.js",
@@ -46,13 +47,8 @@ const sourceFiles = [
     "src/services/svdManager.js",
     "src/services/svdPeripheralService.js",
     "src/services/debugControlService.js",
+    "src/services/samplingArchive.js",
     "src/services/agentOrchestrator.js",
-    "src/services/recordingStorage.js",
-    "src/services/recordingService.js",
-    "src/services/recordingExport.js",
-    "src/services/recordingUi.js",
-    "src/services/recordingAgent.js",
-    "src/services/recorderSampler.js",
     "src/i18n/index.js",
     "src/i18n/zh.js",
     "src/i18n/en.js",
@@ -74,8 +70,7 @@ const sourceFiles = [
     "skills/mcu-fault-analyzer/scripts/analyze-fault.js",
     "skills/mcu-elf-analyze/scripts/analyze-elf.js",
     "skills/mcu-peripheral-debug/scripts/peripheral.js",
-    "skills/mcu-debug-control/scripts/debug.js",
-    "skills/mcu-recording/scripts/record.js"
+    "skills/mcu-debug-control/scripts/debug.js"
 ];
 
 const allTests = [
@@ -90,6 +85,8 @@ const allTests = [
     "test/agent-skills.test.js",
     "test/skill-installer.test.js",
     "test/csv-export.test.js",
+    "test/sampling-archive.test.js",
+    "test/feedback-prompt.test.js",
     "test/chart-viewport.test.js",
     "test/openocd-parser.test.js",
     "test/openocd-exec.test.js",
@@ -115,15 +112,7 @@ const allTests = [
     "test/var-write.test.js",
     "test/fault-info.test.js",
     "test/write-authorization.test.js",
-    "test/flash-skills.test.js",
-    "test/recording-storage.test.js",
-    "test/recording-quota.test.js",
-    "test/recording-service.test.js",
-    "test/recording-sampling.test.js",
-    "test/recording-export.test.js",
-    "test/recording-ui.test.js",
-    "test/recording-skills.test.js",
-    "test/recording-stress.test.js"
+    "test/flash-skills.test.js"
 ];
 
 // 发布元数据一致性检查只在发布流程运行，日常提交不做版本/README 声明校验。
@@ -143,12 +132,9 @@ const qualityTests = [
     "test/svd-manager.test.js",
     "test/svd-peripheral.test.js",
     "test/debug-control.test.js",
-    "test/hil-runner.test.js",
-    "test/recording-storage.test.js",
-    "test/recording-quota.test.js",
-    "test/recording-service.test.js",
-    "test/recording-sampling.test.js",
-    "test/recording-export.test.js"
+    "test/sampling-archive.test.js",
+    "test/feedback-prompt.test.js",
+    "test/hil-runner.test.js"
 ];
 
 function run(args) {
