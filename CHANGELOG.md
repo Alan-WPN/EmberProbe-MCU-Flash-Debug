@@ -6,6 +6,12 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-08-30
+
+### Added
+
+- 采样归档与 CSV 导出：采样开始后自动把完整历史写入临时归档，无需单独开启录制；可随时按变量和时间范围流式导出 CSV，扩展退出时自动删除内部数据。新增 `emberprobe.samplingArchiveMaxMiB` 限制当前扩展会话的归档磁盘占用（默认 1024 MiB）。
+
 ### Fixed
 
 - OpenOCD 测试假件的连接增加 error 处理，避免拆除连接时的 `ECONNRESET` 在 macOS/Windows 上崩溃测试进程。
