@@ -26,10 +26,10 @@ EmberProbe 是一款面向 Cortex-M 开发的 VS Code 扩展。它基于 OpenOCD
 
 - 类型支持：标量优先使用 DWARF 类型信息，支持 `u8/i8/u16/i16/u32/i32/f32/u64/i64/f64`；结构体、联合体和数组可展开并选择标量叶子成员。
 - 64 位精度：`u64/i64` 图表在 ±2^53 外使用 Number 近似值；侧边栏、CSV 和 Agent 结果优先使用精确十进制 `valueText`。
-- CSV 导出：可选择包含已隐藏曲线在内的任意有数据系列；剪辑轨道式双端时间轴始终可见，非自定义模式时置灰，自定义模式默认全选且右端为打开导出对话框的时刻。
+- CSV 导出：采样开始后自动把完整历史写入临时归档，无需另行开启录制；可随时按变量和时间范围流式导出，扩展退出时自动删除内部数据。
 - 实时写入：侧边栏可把具有可靠 DWARF 类型且位于 ELF 可写段的标量加入写入列表；写入只在采样会话运行时启用，并在每次写入后回读校验。
 - 限制：仅支持 Cortex-M 及固定地址的全局/静态变量；采样带宽有限（约 10–50 Hz）。多面板共享采样启停和间隔，内存占用随面板数线性增长，每个面板分别受 `maxSamples` 限制。
-- 相关设置：`emberprobe.tclPort`、`emberprobe.sampleIntervalMs`、`emberprobe.maxSamples`。
+- 相关设置：`emberprobe.tclPort`、`emberprobe.sampleIntervalMs`、`emberprobe.maxSamples`、`emberprobe.samplingArchiveMaxMiB`。
 
 ## Agent Skills
 

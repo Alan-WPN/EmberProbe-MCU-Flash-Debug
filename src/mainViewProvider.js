@@ -27,6 +27,7 @@ const { AgentOrchestrator } = require("./services/agentOrchestrator");
 const { ElfService } = require("./services/elfService");
 const { OpenOcdStatusService } = require("./services/openocdStatusService");
 const { SkillStatusService, hasWorkspaceSkills } = require("./services/skillStatusService");
+const { FeedbackPromptService } = require("./services/feedbackPromptService");
 const { ChipInfoService } = require("./services/chipInfoService");
 const {
     LiveWatchService,
@@ -40,6 +41,7 @@ const { DebugSessionBridge, MIN_DAP_INTERVAL_MS } = require("./services/debugSes
 const { SvdManager } = require("./services/svdManager");
 const { SvdPeripheralService } = require("./services/svdPeripheralService");
 const { DebugControlService } = require("./services/debugControlService");
+const { SamplingArchive } = require("./services/samplingArchive");
 const { resolveCortexToolchainForWorkspace } = require("./services/cortexToolchainService");
 const { externalizeWebviewHtml } = require("./webviewAssets");
 const fs = require("fs");
@@ -176,6 +178,21 @@ class MainViewProvider {
             onTargetState: event => this._handleManagedTargetState(event),
             beforePausedRead: () => this._quiesceManagedRuntimeRead()
         });
+        const archiveLimitMiB = validation.clampInteger(
+            vscode.workspace.getConfiguration('emberprobe').get('samplingArchiveMaxMiB', 1024),
+            1024,
+            64,
+            102400
+        );
+        this._samplingArchive = new SamplingArchive({
+            rootDir: path.join(
+                context.globalStorageUri.fsPath,
+                `sampling-history-${process.pid}-${crypto.randomBytes(6).toString('hex')}`
+            ),
+            maxBytes: archiveLimitMiB * 1024 * 1024,
+            onBackpressure: paused => this._setSamplingArchiveBackpressure(paused),
+            onError: error => this._postLive({ type: 'liveError', message: error.message })
+        });
         this._writeAuthorization = new WriteAuthorization(context.workspaceState);
         this._peripheralWriteAuthorization = new PeripheralWriteAuthorization();
         this._configurationStore = new ConfigurationStore({
@@ -218,6 +235,7 @@ class MainViewProvider {
             t: (key, params) => this._t(key, params),
             onStatus: status => this._webviewView?.webview.postMessage({ type: 'skillStatus', ...status })
         });
+        this._feedbackPromptService = new FeedbackPromptService({ vscode, context });
         this._chipInfoService = new ChipInfoService({
             vscode,
             context,
@@ -1447,8 +1465,14 @@ class MainViewProvider {
                     case 'setInterval':
                         this._setLiveInterval(message.intervalMs);
                         break;
+                    case 'samplingArchiveInfo':
+                        post({
+                            type: 'samplingArchiveInfo',
+                            openExport: message.openExport === true,
+                            ...this._samplingArchive.status()
+                        });
+                        break;
                     case 'exportCsv': {
-                        if (!message.csv) break;
                         const stamp = new Date(), pad = (n) => String(n).padStart(2, '0');
                         const name = `emberprobe-live-${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}-${pad(stamp.getHours())}${pad(stamp.getMinutes())}${pad(stamp.getSeconds())}.csv`;
                         const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
@@ -1458,9 +1482,14 @@ class MainViewProvider {
                         });
                         if (!target) { post({ type: 'exportCsvResult', ok: false, cancelled: true }); break; }
                         try {
-                            await fs.promises.writeFile(target.fsPath, message.csv, 'utf8');
+                            const result = await this._samplingArchive.exportCsv({
+                                outputPath: target.fsPath,
+                                names: message.names,
+                                fromMs: message.fromMs,
+                                toMs: message.toMs
+                            });
                             vscode.window.showInformationMessage(this._t('msg.csvExported', { file: path.basename(target.fsPath) }));
-                            post({ type: 'exportCsvResult', ok: true, seriesCount: Number(message.seriesCount) || 0, rowCount: Number(message.rowCount) || 0 });
+                            post({ type: 'exportCsvResult', ok: true, seriesCount: result.seriesCount, rowCount: result.rows });
                         } catch (error) {
                             vscode.window.showErrorMessage(this._t('msg.csvExportFailed', { msg: error.message }));
                             post({ type: 'exportCsvResult', ok: false, message: error.message });
@@ -1658,6 +1687,18 @@ class MainViewProvider {
         );
         if (sidebar.scalarSamples.length) this._webviewView?.webview.postMessage({ type: 'liveSample', samples: sidebar.scalarSamples, t });
         if (sidebar.compositeSamples.length) this._webviewView?.webview.postMessage({ type: 'liveCompositeSample', samples: sidebar.compositeSamples, t });
+        const archiveTypes = new Map(types.sidebar);
+        for (const graphTypes of types.graphs.values()) {
+            for (const [name, type] of graphTypes) if (!archiveTypes.has(name)) archiveTypes.set(name, type);
+        }
+        const archived = this._liveWatchService.decodeConsumerSamples(samples, t, archiveTypes, null, new Map());
+        this._samplingArchive.append(archived.scalarSamples, t);
+    }
+
+    _setSamplingArchiveBackpressure(paused) {
+        if (this._liveSession) this._liveSession.setSamplingEnabled(!paused);
+        if (this._managedDebugServer) this._managedDebugServer.setSamplingEnabled(!paused && this._samplingIntent);
+        this._debugBridge.setIntent(!paused && this._samplingIntent);
     }
 
     async _refreshSamplingPlan() {
@@ -1897,6 +1938,7 @@ class MainViewProvider {
             await this._stopManagedDebugServer();
             const stopped = this.stopLiveWatch();
             if (stopped) await stopped;
+            await this._samplingArchive.dispose();
             this.disposeDebugBridge();
             const agentStopped = this.stopAgentReadIfRunning();
             if (agentStopped) await agentStopped;
@@ -2006,6 +2048,12 @@ class MainViewProvider {
                     webviewView.webview.postMessage({ type: 'openocdStatus', ...this._openOcdStatusService.status });
                     this.refreshOpenOcdStatus(false);
                     this.refreshSkillStatus().catch(error => console.error('Agent Skills 状态检查失败：', error.message));
+                    // 反馈提示（star/issue）由 host 统一决策：同一时刻最多推送一条
+                    const feedbackPrompt = this._feedbackPromptService.resolve();
+                    if (feedbackPrompt.kind) {
+                        webviewView.webview.postMessage({ type: 'feedbackPrompt', kind: feedbackPrompt.kind });
+                        this._feedbackPromptService.markShown(feedbackPrompt.kind).catch(error => console.error('反馈提示状态保存失败：', error.message || error));
+                    }
                     break;
                 }
                 case 'openocdAction': {
@@ -2100,6 +2148,12 @@ class MainViewProvider {
                 case 'setLang': {
                     this._setLang(message.lang);
                     this._postLive({ type: 'setLang', lang: this._lang });
+                    break;
+                }
+                case 'feedbackPromptAction': {
+                    // kind/action 白名单校验在服务内完成，非法值静默忽略；URL 只取服务内常量
+                    if (message.action === 'open') this._feedbackPromptService.open(message.kind).catch(error => console.error('打开 GitHub 失败：', error.message || error));
+                    else if (message.action === 'dismiss') this._feedbackPromptService.snooze(message.kind).catch(error => console.error('反馈提示状态保存失败：', error.message || error));
                     break;
                 }
             }

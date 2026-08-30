@@ -387,5 +387,10 @@ module.exports = Object.freeze({
     "diag.kvCoreRev": "Core Revision",
     "diag.kvFlash": "Flash",
     "diag.kvState": "Target State",
-    "diag.channelName": "EmberProbe Chip Info"
+    "diag.channelName": "EmberProbe Chip Info",
+    "fb.starText": "Enjoying EmberProbe? Give it a Star on GitHub",
+    "fb.issueText": "Hit a problem? File an issue on GitHub",
+    "fb.featureText": "Need a new feature? File an issue on GitHub",
+    "fb.openTitle": "Open on GitHub",
+    "fb.dismissTitle": "Dismiss"
 });

@@ -387,5 +387,10 @@ module.exports = Object.freeze({
     "diag.kvCoreRev": "内核修订",
     "diag.kvFlash": "Flash",
     "diag.kvState": "目标状态",
-    "diag.channelName": "EmberProbe 芯片信息"
+    "diag.channelName": "EmberProbe 芯片信息",
+    "fb.starText": "觉得插件不错？点个 Star 支持一下吧",
+    "fb.issueText": "遇到问题了？提个 Issue 告诉我们",
+    "fb.featureText": "需要新功能？提个 Issue 告诉我们",
+    "fb.openTitle": "在 GitHub 打开",
+    "fb.dismissTitle": "关闭"
 });
