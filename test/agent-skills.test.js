@@ -24,6 +24,23 @@ const execFileAsync = promisify(execFile);
     });
     assert.throws(() => configSkill.parseSet("broken"), /Invalid assignment/);
     assert.deepStrictEqual(liveSkill.variableSpecs("tick,sinx:f32"), [{ name: "tick" }, { name: "sinx", type: "f32" }]);
+    const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-output-boundary-"));
+    try {
+        assert.strictEqual(
+            liveSkill.workspaceOutputPath(outputRoot, "exports/live.csv"),
+            path.join(fs.realpathSync(outputRoot), "exports", "live.csv")
+        );
+        assert.throws(
+            () => liveSkill.workspaceOutputPath(outputRoot, path.join(os.tmpdir(), "outside.csv")),
+            (error) => error.code === "PATH_OUTSIDE_WORKSPACE"
+        );
+        assert.throws(
+            () => liveSkill.workspaceOutputPath(outputRoot, "../outside.csv"),
+            (error) => error.code === "PATH_OUTSIDE_WORKSPACE"
+        );
+    } finally {
+        fs.rmSync(outputRoot, { recursive: true, force: true });
+    }
     const targetDiagnostic = diagnosticForError(
         Object.assign(new Error("cannot read IDR"), {
             code: "TARGET_NOT_CONNECTED",

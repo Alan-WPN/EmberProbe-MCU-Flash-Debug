@@ -22,16 +22,26 @@ function resolveLeafPath(name, byName, supported) {
     if (!parsed || !parsed.segments.length) return null;
     const base = byName.get(parsed.base);
     if (!base || !base.isComposite || !base.compositeLayout) return null;
-    const leaves = expandCompositeLeaves({ name: base.name, address: base.address, size: base.size }, base.compositeLayout, parsed);
+    const leaves = expandCompositeLeaves(
+        { name: base.name, address: base.address, size: base.size },
+        base.compositeLayout,
+        parsed
+    );
     if (leaves.length !== 1) return null; // 仅单标量叶子可入观察列表
     const leaf = leaves[0];
     if (!supported.has(leaf.type)) return null;
-    return { name, address: leaf.address >>> 0, size: typeByteLength(leaf.type), type: leaf.type };
+    return {
+        name,
+        address: leaf.address >>> 0,
+        size: Number(leaf.size) || typeByteLength(leaf.type),
+        type: leaf.type,
+        ...(Number.isInteger(leaf.bitSize) ? { bitSize: leaf.bitSize, bitOffset: leaf.bitOffset } : {})
+    };
 }
 
 function normalizeWatchList(items, symbols) {
     if (!Array.isArray(items) || !Array.isArray(symbols)) return [];
-    const byName = new Map(symbols.map(symbol => [symbol.name, symbol]));
+    const byName = new Map(symbols.map((symbol) => [symbol.name, symbol]));
     const supported = new Set(SUPPORTED_TYPES);
     const seen = new Set();
     const result = [];
@@ -41,7 +51,10 @@ function normalizeWatchList(items, symbols) {
         if (!symbol) {
             // 非直接符号：尝试按复合变量成员/元素路径解析为标量叶子
             const leaf = resolveLeafPath(item.name, byName, supported);
-            if (leaf) { seen.add(item.name); result.push(leaf); }
+            if (leaf) {
+                seen.add(item.name);
+                result.push(leaf);
+            }
             continue;
         }
         // 复合变量（结构体/数组）保留布局信息，跳过标量类型校验
@@ -51,7 +64,7 @@ function normalizeWatchList(items, symbols) {
                 name: symbol.name,
                 address: Number(symbol.address) >>> 0,
                 size: Number(symbol.size) >>> 0,
-                type: '',
+                type: "",
                 isComposite: true,
                 compositeLayout: symbol.compositeLayout || null
             });
@@ -64,7 +77,8 @@ function normalizeWatchList(items, symbols) {
             name: symbol.name,
             address: Number(symbol.address) >>> 0,
             size: Number(symbol.size) >>> 0,
-            type
+            type,
+            ...(Number.isInteger(item.bitSize) ? { bitSize: item.bitSize, bitOffset: item.bitOffset } : {})
         });
     }
     return result;

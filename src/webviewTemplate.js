@@ -13,7 +13,7 @@ function loadWebviewAsset(area, name) {
         path.join(__dirname, "webview", area, name),
         path.join(__dirname, "..", "src", "webview", area, name)
     ];
-    const file = candidates.find(candidate => fs.existsSync(candidate));
+    const file = candidates.find((candidate) => fs.existsSync(candidate));
     if (!file) throw new Error(`Missing webview asset: ${key}`);
     const content = fs.readFileSync(file, "utf8");
     cache.set(key, content);

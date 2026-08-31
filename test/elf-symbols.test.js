@@ -1,6 +1,13 @@
 "use strict";
 const assert = require("assert");
-const { parseElfSymbols, decodeValue, decodeValueText, encodeValue, typeByteLength, resolveVariableRequests } = require("../src/elfSymbols");
+const {
+    parseElfSymbols,
+    decodeValue,
+    decodeValueText,
+    encodeValue,
+    typeByteLength,
+    resolveVariableRequests
+} = require("../src/elfSymbols");
 const { parseMemoryValues } = require("../src/liveWatch");
 const { encodingToWatchType, readULEB, readSLEB, parseDwarfVariableTypes } = require("../src/dwarf");
 const liveSkill = require("../skills/mcu-live-watch/scripts/read-live");
@@ -12,35 +19,40 @@ function buildElf() {
     const strtabSize = strtab.length; // 10
     let symtabOff = strtabOff + strtabSize;
     symtabOff = (symtabOff + 3) & ~3; // 4 字节对齐 → 64
-    const symCount = 2;               // 索引 0 为空符号
+    const symCount = 2; // 索引 0 为空符号
     const symtabSize = symCount * 16;
     const shoff = symtabOff + symtabSize;
-    const shnum = 3;                  // null / .strtab / .symtab
+    const shnum = 3; // null / .strtab / .symtab
     const buf = Buffer.alloc(shoff + shnum * 40);
 
     // ELF 头
-    buf[0] = 0x7f; buf[1] = 0x45; buf[2] = 0x4c; buf[3] = 0x46; // 魔数
-    buf[4] = 1; buf[5] = 1; buf[6] = 1;                          // 32 位 / 小端 / 版本
-    buf.writeUInt16LE(2, 16);      // e_type ET_EXEC
-    buf.writeUInt16LE(0x28, 18);   // e_machine ARM
-    buf.writeUInt32LE(1, 20);      // e_version
-    buf.writeUInt32LE(shoff, 32);  // e_shoff
-    buf.writeUInt16LE(52, 40);     // e_ehsize
-    buf.writeUInt16LE(40, 46);     // e_shentsize
-    buf.writeUInt16LE(shnum, 48);  // e_shnum
-    buf.writeUInt16LE(0, 50);      // e_shstrndx（本解析器不使用）
+    buf[0] = 0x7f;
+    buf[1] = 0x45;
+    buf[2] = 0x4c;
+    buf[3] = 0x46; // 魔数
+    buf[4] = 1;
+    buf[5] = 1;
+    buf[6] = 1; // 32 位 / 小端 / 版本
+    buf.writeUInt16LE(2, 16); // e_type ET_EXEC
+    buf.writeUInt16LE(0x28, 18); // e_machine ARM
+    buf.writeUInt32LE(1, 20); // e_version
+    buf.writeUInt32LE(shoff, 32); // e_shoff
+    buf.writeUInt16LE(52, 40); // e_ehsize
+    buf.writeUInt16LE(40, 46); // e_shentsize
+    buf.writeUInt16LE(shnum, 48); // e_shnum
+    buf.writeUInt16LE(0, 50); // e_shstrndx（本解析器不使用）
 
     // .strtab 内容
     strtab.copy(buf, strtabOff);
 
     // .symtab：索引 1 = myGlobal
     const s1 = symtabOff + 16;
-    buf.writeUInt32LE(1, s1 + 0);            // st_name
-    buf.writeUInt32LE(0x20000010, s1 + 4);   // st_value（地址）
-    buf.writeUInt32LE(4, s1 + 8);            // st_size
-    buf[s1 + 12] = 0x11;                     // st_info: STB_GLOBAL<<4 | STT_OBJECT
-    buf[s1 + 13] = 0;                        // st_other
-    buf.writeUInt16LE(1, s1 + 14);           // st_shndx（非零）
+    buf.writeUInt32LE(1, s1 + 0); // st_name
+    buf.writeUInt32LE(0x20000010, s1 + 4); // st_value（地址）
+    buf.writeUInt32LE(4, s1 + 8); // st_size
+    buf[s1 + 12] = 0x11; // st_info: STB_GLOBAL<<4 | STT_OBJECT
+    buf[s1 + 13] = 0; // st_other
+    buf.writeUInt16LE(1, s1 + 14); // st_shndx（非零）
 
     // 节头表
     const sh = (i) => shoff + i * 40;
@@ -81,22 +93,31 @@ assert.strictEqual(decodeValue(encodeValue("-9223372036854775808", "i64"), "i64"
 assert.strictEqual(decodeValueText(encodeValue("-9223372036854775808", "i64"), "i64"), "-9223372036854775808");
 assert.strictEqual(decodeValue(encodeValue(1.25, "f64"), "f64"), 1.25);
 assert.strictEqual(decodeValueText(encodeValue("nan", "f64"), "f64"), "NaN");
-assert.strictEqual(liveSkill.decodeText([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff], "u64"), "18446744073709551615");
-const resolvedRequests = resolveVariableRequests([
-    { name: "Tick", address: 0x20000000, size: 4, watchType: "u32", isComposite: false },
-    { name: "sinx", address: 0x20000004, size: 4, watchType: "f32", isComposite: false }
-], [{ name: "tick" }, { name: "sinx" }]);
-assert.deepStrictEqual(resolvedRequests.map(item => [item.requestedName, item.name, item.type]), [
-    ["tick", "Tick", "u32"],
-    ["sinx", "sinx", "f32"]
-]);
+assert.strictEqual(
+    liveSkill.decodeText([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff], "u64"),
+    "18446744073709551615"
+);
+const resolvedRequests = resolveVariableRequests(
+    [
+        { name: "Tick", address: 0x20000000, size: 4, watchType: "u32", isComposite: false },
+        { name: "sinx", address: 0x20000004, size: 4, watchType: "f32", isComposite: false }
+    ],
+    [{ name: "tick" }, { name: "sinx" }]
+);
+assert.deepStrictEqual(
+    resolvedRequests.map((item) => [item.requestedName, item.name, item.type]),
+    [
+        ["tick", "Tick", "u32"],
+        ["sinx", "sinx", "f32"]
+    ]
+);
 assert.throws(() => resolveVariableRequests([], [{ name: "missing" }]), /not found/);
 
 // 同一段原始字节按不同观察类型解码：图表与侧栏对同名变量选不同 type 时各自得到正确值
 const shared = [0x34, 0x12, 0x00, 0x00];
-assert.strictEqual(decodeValue(shared, "u16"), 0x1234);      // 低 2 字节
+assert.strictEqual(decodeValue(shared, "u16"), 0x1234); // 低 2 字节
 assert.strictEqual(decodeValue(shared, "u32"), 0x00001234);
-assert.strictEqual(decodeValue(shared, "i8"), 0x34);        // 最低字节，正数
+assert.strictEqual(decodeValue(shared, "i8"), 0x34); // 最低字节，正数
 
 // parseMemoryValues：十进制、0x 前缀、含地址标签
 assert.deepStrictEqual(parseMemoryValues("10 255 32 0"), [10, 255, 32, 0]);
@@ -120,7 +141,7 @@ assert.strictEqual(encodingToWatchType(0x05, 8), "i64");
 assert.strictEqual(encodingToWatchType(0x07, 8), "u64");
 assert.strictEqual(encodingToWatchType(0x05, 2), "i16"); // signed
 assert.strictEqual(encodingToWatchType(0x07, 4), "u32"); // unsigned
-assert.strictEqual(encodingToWatchType(0x08, 1), "u8");  // unsigned char
+assert.strictEqual(encodingToWatchType(0x08, 1), "u8"); // unsigned char
 // DWARF：LEB128 解码
 let leb = { p: 0 };
 assert.strictEqual(readULEB(Buffer.from([0xe5, 0x8e, 0x26]), leb), 624485);

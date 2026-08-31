@@ -10,6 +10,7 @@ const path = require("path");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
 const { AgentBridge } = require("../src/agentBridge");
+const { FlashAuthorization } = require("../src/flashAuthorization");
 const flashCommon = require("../skills/_emberprobe/flash-common");
 
 const execFileAsync = promisify(execFile);
@@ -25,11 +26,17 @@ function makeFakeOpenOcd(dir) {
     fs.mkdirSync(bin, { recursive: true });
     if (process.platform === "win32") {
         const file = path.join(bin, "fake-openocd.cmd");
-        fs.writeFileSync(file, "@echo off\r\necho Open On-Chip Debugger 0.12.0\r\necho ARGS:%*\r\necho EP_VERIFY OK\r\nexit /b 0\r\n");
+        fs.writeFileSync(
+            file,
+            "@echo off\r\necho Open On-Chip Debugger 0.12.0\r\necho ARGS:%*\r\necho EP_VERIFY OK\r\nexit /b 0\r\n"
+        );
         return file;
     }
     const file = path.join(bin, "fake-openocd.sh");
-    fs.writeFileSync(file, "#!/bin/sh\necho \"Open On-Chip Debugger 0.12.0\"\necho \"ARGS:$@\"\necho \"EP_VERIFY OK\"\nexit 0\n");
+    fs.writeFileSync(
+        file,
+        '#!/bin/sh\necho "Open On-Chip Debugger 0.12.0"\necho "ARGS:$@"\necho "EP_VERIFY OK"\nexit 0\n'
+    );
     fs.chmodSync(file, 0o755);
     return file;
 }
@@ -39,7 +46,10 @@ function firstJsonLine(stdout) {
 }
 
 function lastJsonLine(stdout) {
-    const lines = stdout.trim().split(/\r?\n/).filter(line => line.trim().startsWith("{"));
+    const lines = stdout
+        .trim()
+        .split(/\r?\n/)
+        .filter((line) => line.trim().startsWith("{"));
     return JSON.parse(lines[lines.length - 1]);
 }
 
@@ -53,19 +63,36 @@ function lastJsonLine(stdout) {
     fs.writeFileSync(elf, "test firmware");
     const fakeOpenOcd = makeFakeOpenOcd(root);
 
-    const bridge = new AgentBridge(root, async method => {
-        if (method !== "config.get") throw Object.assign(new Error(`Unexpected method: ${method}`), { code: "METHOD_NOT_FOUND" });
-        return {
-            elf,
-            debugger: "cmsis-dap.cfg",
-            mcu: "geehy/apm32f4x.cfg",
-            openocdPath: fakeOpenOcd
-        };
-    }, path.join(root, ".global-storage"));
+    const flashAuthorization = new FlashAuthorization();
+    const bridge = new AgentBridge(
+        root,
+        async (method, params) => {
+            if (method === "config.get") {
+                return {
+                    elf,
+                    debugger: "cmsis-dap.cfg",
+                    mcu: "geehy/apm32f4x.cfg",
+                    openocdPath: fakeOpenOcd
+                };
+            }
+            if (method === "flash.authorize") {
+                return flashAuthorization.authorize(
+                    {
+                        elf: { path: params.elf, sha256: params.elfSha256 },
+                        target: params.target,
+                        probe: params.probe,
+                        openocd: params.openocd
+                    },
+                    params.confirmationId
+                );
+            }
+            throw Object.assign(new Error(`Unexpected method: ${method}`), { code: "METHOD_NOT_FOUND" });
+        },
+        path.join(root, ".global-storage")
+    );
 
-    const run = (script, extra = []) => execFileAsync(process.execPath, [
-        path.resolve(__dirname, "../skills", script), "--workspace", root, ...extra
-    ]);
+    const run = (script, extra = []) =>
+        execFileAsync(process.execPath, [path.resolve(__dirname, "../skills", script), "--workspace", root, ...extra]);
 
     try {
         await bridge.start();
@@ -81,6 +108,7 @@ function lastJsonLine(stdout) {
         }
         assert.strictEqual(downloadPreflight.ready, true);
         assert.ok(/^[0-9a-f]{64}$/.test(downloadPreflight.elfSha256));
+        assert.strictEqual(downloadPreflight.flashAuthorization.confirmationRequired, true);
 
         const verifyPreflight = firstJsonLine((await run("mcu-flash-verify/scripts/verify.js")).stdout);
         assert.strictEqual(verifyPreflight.target, "geehy/apm32f4x.cfg");
@@ -93,19 +121,43 @@ function lastJsonLine(stdout) {
             assert.strictEqual(verified.verified, true);
             assert.strictEqual(verified.elf, elf);
             assert.strictEqual(verified.elfSha256, downloadPreflight.elfSha256);
-            assert.ok(verifyRun.stdout.includes("-work-area-size 0"), "verify should force host-side comparison without target work-area");
+            assert.ok(
+                verifyRun.stdout.includes("-work-area-size 0"),
+                "verify should force host-side comparison without target work-area"
+            );
 
-            const downloaded = await run("mcu-download/scripts/download.js", ["--execute"]);
+            await assert.rejects(
+                run("mcu-download/scripts/download.js", ["--execute"]),
+                (error) => /Flash confirmation is required/.test(error.stderr || ""),
+                "download execution must not rely on --execute alone"
+            );
+            const downloaded = await run("mcu-download/scripts/download.js", [
+                "--execute",
+                "--confirmation-id",
+                downloadPreflight.flashAuthorization.confirmationId
+            ]);
             assert.ok(downloaded.stdout.includes("verify reset exit"), "OpenOCD should receive the program command");
-            assert.ok(downloaded.stdout.includes("-work-area-backup 1"), "download should preserve target RAM used as work-area");
+            assert.ok(
+                downloaded.stdout.includes("-work-area-backup 1"),
+                "download should preserve target RAM used as work-area"
+            );
             assert.ok(downloaded.stdout.includes("EP_VERIFY OK"));
 
             const oldOpenOcd = path.join(root, "bin", "old-openocd.sh");
-            fs.writeFileSync(oldOpenOcd, "#!/bin/sh\necho \"Open On-Chip Debugger 0.11.0\"\nexit 0\n");
+            fs.writeFileSync(oldOpenOcd, '#!/bin/sh\necho "Open On-Chip Debugger 0.11.0"\nexit 0\n');
             fs.chmodSync(oldOpenOcd, 0o755);
+            const oldPreflight = firstJsonLine(
+                (await run("mcu-download/scripts/download.js", ["--openocd", oldOpenOcd])).stdout
+            );
             await assert.rejects(
-                run("mcu-download/scripts/download.js", ["--execute", "--openocd", oldOpenOcd]),
-                error => /Incompatible OpenOCD 0\.11\.0/.test(error.stderr || ""),
+                run("mcu-download/scripts/download.js", [
+                    "--execute",
+                    "--openocd",
+                    oldOpenOcd,
+                    "--confirmation-id",
+                    oldPreflight.flashAuthorization.confirmationId
+                ]),
+                (error) => /Incompatible OpenOCD 0\.11\.0/.test(error.stderr || ""),
                 "Agent download must refuse OpenOCD 0.11"
             );
         }
@@ -117,7 +169,12 @@ function lastJsonLine(stdout) {
             fs.writeFileSync(upperElf, "upper case elf");
             const bare = await execFileAsync(process.execPath, [
                 path.resolve(__dirname, "../skills/mcu-download/scripts/download.js"),
-                "--workspace", bareRoot, "--probe", "stlink.cfg", "--target", "stm32f4x.cfg"
+                "--workspace",
+                bareRoot,
+                "--probe",
+                "stlink.cfg",
+                "--target",
+                "stm32f4x.cfg"
             ]);
             const bareJson = firstJsonLine(bare.stdout);
             assert.strictEqual(bareJson.elf, fs.realpathSync(upperElf));
@@ -131,7 +188,7 @@ function lastJsonLine(stdout) {
         await bridge.stop();
         fs.rmSync(root, { recursive: true, force: true });
     }
-})().catch(error => {
+})().catch((error) => {
     console.error(error);
     process.exitCode = 1;
 });

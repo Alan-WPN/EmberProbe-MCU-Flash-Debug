@@ -5,6 +5,7 @@
 
 const elfFormat = require("./elfFormat");
 const zlib = require("zlib");
+const { decompress: decompressZstd } = require("fzstd");
 const MAX_DWARF_SECTION_BYTES = 128 * 1024 * 1024;
 const REQUIRED_DWARF_SECTIONS = new Set([
     ".debug_info",
@@ -63,6 +64,9 @@ const DW_AT_name = 0x03,
     DW_AT_declaration = 0x3c,
     DW_AT_str_offsets_base = 0x72,
     DW_AT_data_member_location = 0x38,
+    DW_AT_bit_size = 0x0d,
+    DW_AT_bit_offset = 0x0c,
+    DW_AT_data_bit_offset = 0x6b,
     DW_AT_count = 0x37,
     DW_AT_upper_bound = 0x2f;
 const DW_ATE_boolean = 0x02,
@@ -117,9 +121,16 @@ function debugSectionData(buf, entry, name) {
         if (data.length < 12) throw new Error(`Compressed DWARF section header is truncated: ${name}`);
         const compressionType = data.readUInt32LE(0);
         const expectedSize = data.readUInt32LE(4);
-        if (compressionType !== 1) throw new Error(`Unsupported DWARF compression type ${compressionType}: ${name}`);
         if (expectedSize > MAX_DWARF_SECTION_BYTES) throw new Error(`Compressed DWARF section is too large: ${name}`);
-        data = zlib.inflateSync(data.subarray(12), { maxOutputLength: MAX_DWARF_SECTION_BYTES });
+        if (compressionType === 1) {
+            data = zlib.inflateSync(data.subarray(12), { maxOutputLength: MAX_DWARF_SECTION_BYTES });
+        } else if (compressionType === 2) {
+            // ELFCOMPRESS_ZSTD。传入按 ELF ch_size 预分配的输出缓冲区，既支持
+            // Node.js 20，也避免解压器根据恶意 frame 自行申请超出上限的内存。
+            data = Buffer.from(decompressZstd(data.subarray(12), new Uint8Array(expectedSize)));
+        } else {
+            throw new Error(`Unsupported DWARF compression type ${compressionType}: ${name}`);
+        }
         if (data.length !== expectedSize) throw new Error(`Compressed DWARF section size mismatch: ${name}`);
     } else if (name.startsWith(".zdebug_") && data.subarray(0, 4).toString("ascii") === "ZLIB") {
         // Legacy GNU .zdebug_* format: "ZLIB" + 8-byte big-endian size + zlib stream.
@@ -150,8 +161,13 @@ function readSections(buf) {
         if (!originalName.startsWith(".debug_") && !originalName.startsWith(".zdebug_")) continue;
         const name = originalName.startsWith(".zdebug_") ? `.debug_${originalName.slice(8)}` : originalName;
         if (!REQUIRED_DWARF_SECTIONS.has(name)) continue;
-        const data = debugSectionData(buf, entries[i], originalName);
-        map.set(name, { data, size: data.length });
+        try {
+            const data = debugSectionData(buf, entries[i], originalName);
+            map.set(name, { data, size: data.length });
+        } catch {
+            // 单个调试节损坏或使用当前运行时不支持的压缩算法时，
+            // 保留其余健康节；主入口会在必需节缺失时安全降级。
+        }
     }
     return map;
 }
@@ -235,8 +251,10 @@ function _parseDwarfInternal(buffer) {
                 return 0;
             } // data8
             case 0x08: {
-                const s = cstr(buf, cur.p);
-                cur.p += s.length + 1;
+                const end = buf.indexOf(0, cur.p);
+                const stringEnd = end < 0 ? buf.length : end;
+                const s = buf.toString("utf8", cur.p, stringEnd);
+                cur.p = end < 0 ? buf.length : end + 1;
                 return { str: s };
             }
             case 0x09: {
@@ -428,123 +446,136 @@ function _parseDwarfInternal(buffer) {
         p += 4;
         if (unitLength === 0xffffffff || unitLength === 0) break; // 不支持 64 位 DWARF
         const cuEnd = Math.min(cuStart + 4 + unitLength, infoEnd);
-        const version = buf.readUInt16LE(p);
-        p += 2;
-        let addrSize, abbrevOff;
-        if (version >= 5) {
-            p += 1;
-            addrSize = buf[p];
-            p += 1;
-            abbrevOff = buf.readUInt32LE(p);
-            p += 4;
-        } else {
-            abbrevOff = buf.readUInt32LE(p);
-            p += 4;
-            addrSize = buf[p];
-            p += 1;
-        }
-        let abbrev = abbrevCache.get(abbrevOff);
-        if (!abbrev) {
-            abbrev = parseAbbrev(abbrevSec.data, abbrevOff);
-            abbrevCache.set(abbrevOff, abbrev);
-        }
-        const cuRel = cuStart - infoStart;
-        let strOffsetsBase = 8;
-        const cur = { p };
         try {
-            let guard = 0;
-            const parentStack = []; // { offset, dieOff } — 有子项的 DIE 栈，用于构建 childrenMap
-            while (cur.p < cuEnd && guard++ < 2000000) {
-                const dieOff = cur.p - infoStart;
-                const code = readULEB(buf, cur);
-                if (code === 0) {
-                    // 兄弟链结束标记：弹出当前父级
-                    if (parentStack.length) parentStack.pop();
-                    continue;
-                }
-                const ab = abbrev.get(code);
-                if (!ab) throw new Error("unknown abbrev code");
-                // 记录父子关系
-                if (parentStack.length) {
-                    const parent = parentStack[parentStack.length - 1];
-                    let siblings = childrenMap.get(parent.dieOff);
-                    if (!siblings) {
-                        siblings = [];
-                        childrenMap.set(parent.dieOff, siblings);
+            const version = buf.readUInt16LE(p);
+            p += 2;
+            let addrSize, abbrevOff;
+            if (version >= 5) {
+                p += 1;
+                addrSize = buf[p];
+                p += 1;
+                abbrevOff = buf.readUInt32LE(p);
+                p += 4;
+            } else {
+                abbrevOff = buf.readUInt32LE(p);
+                p += 4;
+                addrSize = buf[p];
+                p += 1;
+            }
+            let abbrev = abbrevCache.get(abbrevOff);
+            if (!abbrev) {
+                abbrev = parseAbbrev(abbrevSec.data, abbrevOff);
+                abbrevCache.set(abbrevOff, abbrev);
+            }
+            const cuRel = cuStart - infoStart;
+            let strOffsetsBase = 8;
+            const cur = { p };
+            try {
+                let guard = 0;
+                const parentStack = []; // { offset, dieOff } — 有子项的 DIE 栈，用于构建 childrenMap
+                while (cur.p < cuEnd && guard++ < 2000000) {
+                    const dieOff = cur.p - infoStart;
+                    const code = readULEB(buf, cur);
+                    if (code === 0) {
+                        // 兄弟链结束标记：弹出当前父级
+                        if (parentStack.length) parentStack.pop();
+                        continue;
                     }
-                    siblings.push(dieOff);
-                }
-                const rec = { tag: ab.tag };
-                for (const attr of ab.attrs) {
-                    const v = readFormValue(cur, attr.form, { addrSize, cuRel, implicit: attr.implicit });
-                    switch (attr.at) {
-                        case DW_AT_name:
-                            if (v && v.str !== undefined) rec.name = v.str;
-                            else if (v && v.strx !== undefined) rec.strx = v.strx;
-                            break;
-                        case DW_AT_type:
-                            if (v && v.ref !== undefined) rec.typeRef = v.ref;
-                            break;
-                        case DW_AT_abstract_origin:
-                            if (v && v.ref !== undefined) rec.abstractOriginRef = v.ref;
-                            break;
-                        case DW_AT_specification:
-                            if (v && v.ref !== undefined) rec.specificationRef = v.ref;
-                            break;
-                        case DW_AT_byte_size:
-                            if (typeof v === "number") rec.byteSize = v;
-                            break;
-                        case DW_AT_encoding:
-                            if (typeof v === "number") rec.encoding = v;
-                            break;
-                        case DW_AT_location:
-                            if (v && v.block && v.block.length >= 1)
-                                rec.hasAddr = v.block[0] === 0x03 || v.block[0] === 0xa1;
-                            else if (typeof v === "number") rec.hasAddr = v === 0x03 || v === 0xa1;
-                            break;
-                        case DW_AT_declaration:
-                            rec.isDecl = !!v;
-                            break;
-                        case DW_AT_str_offsets_base:
-                            if (typeof v === "number") strOffsetsBase = v;
-                            break;
-                        case DW_AT_data_member_location:
-                            if (typeof v === "number") rec.memberOffset = v;
-                            else if (v && v.block && v.block.length > 0) {
-                                // DW_OP_plus_uconst (0x23) 后跟 ULEB 常量；或纯 ULEB 常量
-                                let bp = 0;
-                                if (v.block[bp] === 0x23) bp++;
-                                if (bp < v.block.length) {
-                                    let val = 0,
-                                        sh = 0,
-                                        b2;
-                                    do {
-                                        b2 = v.block[bp++];
-                                        val += (b2 & 0x7f) * Math.pow(2, sh);
-                                        sh += 7;
-                                    } while (b2 & 0x80);
-                                    rec.memberOffset = val;
+                    const ab = abbrev.get(code);
+                    if (!ab) throw new Error("unknown abbrev code");
+                    // 记录父子关系
+                    if (parentStack.length) {
+                        const parent = parentStack[parentStack.length - 1];
+                        let siblings = childrenMap.get(parent.dieOff);
+                        if (!siblings) {
+                            siblings = [];
+                            childrenMap.set(parent.dieOff, siblings);
+                        }
+                        siblings.push(dieOff);
+                    }
+                    const rec = { tag: ab.tag };
+                    for (const attr of ab.attrs) {
+                        const v = readFormValue(cur, attr.form, { addrSize, cuRel, implicit: attr.implicit });
+                        switch (attr.at) {
+                            case DW_AT_name:
+                                if (v && v.str !== undefined) rec.name = v.str;
+                                else if (v && v.strx !== undefined) rec.strx = v.strx;
+                                break;
+                            case DW_AT_type:
+                                if (v && v.ref !== undefined) rec.typeRef = v.ref;
+                                break;
+                            case DW_AT_abstract_origin:
+                                if (v && v.ref !== undefined) rec.abstractOriginRef = v.ref;
+                                break;
+                            case DW_AT_specification:
+                                if (v && v.ref !== undefined) rec.specificationRef = v.ref;
+                                break;
+                            case DW_AT_byte_size:
+                                if (typeof v === "number") rec.byteSize = v;
+                                break;
+                            case DW_AT_encoding:
+                                if (typeof v === "number") rec.encoding = v;
+                                break;
+                            case DW_AT_location:
+                                if (v && v.block && v.block.length >= 1)
+                                    rec.hasAddr = v.block[0] === 0x03 || v.block[0] === 0xa1;
+                                else if (typeof v === "number") rec.hasAddr = v === 0x03 || v === 0xa1;
+                                break;
+                            case DW_AT_declaration:
+                                rec.isDecl = !!v;
+                                break;
+                            case DW_AT_str_offsets_base:
+                                if (typeof v === "number") strOffsetsBase = v;
+                                break;
+                            case DW_AT_data_member_location:
+                                if (typeof v === "number") rec.memberOffset = v;
+                                else if (v && v.block && v.block.length > 0) {
+                                    // DW_OP_plus_uconst (0x23) 后跟 ULEB 常量；或纯 ULEB 常量
+                                    let bp = 0;
+                                    if (v.block[bp] === 0x23) bp++;
+                                    if (bp < v.block.length) {
+                                        let val = 0,
+                                            sh = 0,
+                                            b2;
+                                        do {
+                                            b2 = v.block[bp++];
+                                            val += (b2 & 0x7f) * Math.pow(2, sh);
+                                            sh += 7;
+                                        } while (b2 & 0x80);
+                                        rec.memberOffset = val;
+                                    }
                                 }
-                            }
-                            break;
-                        case DW_AT_count:
-                            if (typeof v === "number") rec.subrangeCount = v;
-                            break;
-                        case DW_AT_upper_bound:
-                            if (typeof v === "number") rec.subrangeUpperBound = v;
-                            break;
+                                break;
+                            case DW_AT_bit_size:
+                                if (typeof v === "number") rec.bitSize = v;
+                                break;
+                            case DW_AT_bit_offset:
+                                if (typeof v === "number") rec.bitOffset = v;
+                                break;
+                            case DW_AT_data_bit_offset:
+                                if (typeof v === "number") rec.dataBitOffset = v;
+                                break;
+                            case DW_AT_count:
+                                if (typeof v === "number") rec.subrangeCount = v;
+                                break;
+                            case DW_AT_upper_bound:
+                                if (typeof v === "number") rec.subrangeUpperBound = v;
+                                break;
+                        }
+                    }
+                    rec.base = strOffsetsBase;
+                    dies.set(dieOff, rec);
+                    if (rec.tag === DW_TAG_variable) variableOffsets.push(dieOff);
+                    // 有子项的 DIE 入栈
+                    if (ab.hasChildren) {
+                        parentStack.push({ offset: dieOff, dieOff });
                     }
                 }
-                rec.base = strOffsetsBase;
-                dies.set(dieOff, rec);
-                if (rec.tag === DW_TAG_variable) variableOffsets.push(dieOff);
-                // 有子项的 DIE 入栈
-                if (ab.hasChildren) {
-                    parentStack.push({ offset: dieOff, dieOff });
-                }
+            } catch (e) {
+                /* 单个 CU 解析失败：跳过，继续其余 CU */
             }
         } catch (e) {
-            /* 单个 CU 解析失败：跳过，继续其余 CU */
+            /* CU header 损坏：跳过本 CU，保留之前已解析的结果 */
         }
         p = cuEnd;
     }
@@ -602,7 +633,7 @@ function _parseDwarfCached(buffer) {
 // 视图的展示语义为准（指针显示为 "T *"、数组显示为 "T []"）。
 // 返回 { kind, typeName, watchType, byteSize }；kind ∈ scalar/struct/union/array/unknown。
 // cache 先写入 placeholder 防循环引用（C 中 struct A { struct A *next; } 一类自引用类型）。
-function _resolveTypeInfo(refKey, dies, cache) {
+function _resolveTypeInfo(refKey, dies, childrenMap, cache) {
     if (cache.has(refKey)) return cache.get(refKey);
     const placeholder = { kind: "unknown", typeName: "", watchType: "", byteSize: 0 };
     cache.set(refKey, placeholder);
@@ -620,7 +651,7 @@ function _resolveTypeInfo(refKey, dies, cache) {
             };
             break;
         case DW_TAG_typedef: {
-            const inner = d.typeRef !== undefined ? _resolveTypeInfo(d.typeRef, dies, cache) : placeholder;
+            const inner = d.typeRef !== undefined ? _resolveTypeInfo(d.typeRef, dies, childrenMap, cache) : placeholder;
             result = {
                 kind: inner.kind,
                 typeName: nm || inner.typeName,
@@ -632,10 +663,11 @@ function _resolveTypeInfo(refKey, dies, cache) {
         case DW_TAG_const_type:
         case DW_TAG_volatile_type:
         case DW_TAG_restrict_type:
-            result = d.typeRef !== undefined ? _resolveTypeInfo(d.typeRef, dies, cache) : placeholder;
+            result = d.typeRef !== undefined ? _resolveTypeInfo(d.typeRef, dies, childrenMap, cache) : placeholder;
             break;
         case DW_TAG_pointer_type: {
-            const inner = d.typeRef !== undefined ? _resolveTypeInfo(d.typeRef, dies, cache) : { typeName: "void" };
+            const inner =
+                d.typeRef !== undefined ? _resolveTypeInfo(d.typeRef, dies, childrenMap, cache) : { typeName: "void" };
             result = { kind: "scalar", typeName: (inner.typeName || "void") + " *", watchType: "u32", byteSize: 4 };
             break;
         }
@@ -664,12 +696,32 @@ function _resolveTypeInfo(refKey, dies, cache) {
             };
             break;
         case DW_TAG_array_type: {
-            const inner = d.typeRef !== undefined ? _resolveTypeInfo(d.typeRef, dies, cache) : placeholder;
+            const inner = d.typeRef !== undefined ? _resolveTypeInfo(d.typeRef, dies, childrenMap, cache) : placeholder;
+            // GCC/Clang 不为数组类型发 DW_AT_byte_size，多维数组的元素大小必须按
+            // 本层 subrange 维度 × 内层大小推导，否则行 stride 恒为 0、所有行都
+            // 解码到第 0 行的地址。单个数组 DIE 挂多个 subrange 的产生器同样按
+            // 维度乘积推导。
+            let dimsProduct = 1;
+            let hasDim = false;
+            const childOffsets = childrenMap.get(refKey);
+            if (childOffsets) {
+                for (const childOff of childOffsets) {
+                    const child = dies.get(childOff);
+                    if (!child || child.tag !== DW_TAG_subrange_type) continue;
+                    let dim = 0;
+                    if (child.subrangeCount !== undefined) dim = child.subrangeCount;
+                    else if (child.subrangeUpperBound !== undefined) dim = child.subrangeUpperBound + 1;
+                    if (dim > 0) {
+                        dimsProduct *= dim;
+                        hasDim = true;
+                    }
+                }
+            }
             result = {
                 kind: "array",
                 typeName: (inner.typeName || "") + "[]",
                 watchType: "",
-                byteSize: d.byteSize || 0
+                byteSize: d.byteSize || (hasDim ? dimsProduct * (inner.byteSize || 0) : 0)
             };
             break;
         }
@@ -682,13 +734,13 @@ function _resolveTypeInfo(refKey, dies, cache) {
 
 // 视图一：变量名 → { typeName, watchType }（共享 typeCache，同类型只解析一次）
 function buildVariableTypes(parsed) {
-    const { dies, variables } = parsed;
+    const { dies, childrenMap, variables } = parsed;
     const typeCache = new Map();
     const result = new Map();
     for (const v of variables) {
         const name = v.name || "";
         if (!name || result.has(name)) continue;
-        const t = v.typeRef !== undefined ? _resolveTypeInfo(v.typeRef, dies, typeCache) : null;
+        const t = v.typeRef !== undefined ? _resolveTypeInfo(v.typeRef, dies, childrenMap, typeCache) : null;
         result.set(name, { typeName: (t && t.typeName) || "", watchType: (t && t.watchType) || "" });
     }
     return result;
@@ -706,12 +758,20 @@ function _collectMembers(typeDieOff, dies, childrenMap, typeCache, depth) {
         const child = dies.get(childOff);
         if (!child || child.tag !== DW_TAG_member) continue;
         const name = child.name || "";
-        const offset = child.memberOffset || 0;
         const memberType =
             child.typeRef !== undefined
-                ? _resolveTypeInfo(child.typeRef, dies, typeCache)
+                ? _resolveTypeInfo(child.typeRef, dies, childrenMap, typeCache)
                 : { kind: "unknown", typeName: "", watchType: "", byteSize: 0 };
         const byteSize = child.byteSize || memberType.byteSize || 0;
+        let offset = child.memberOffset || 0;
+        let bitOffset;
+        if (Number.isInteger(child.dataBitOffset)) {
+            offset = Math.floor(child.dataBitOffset / 8);
+            bitOffset = child.dataBitOffset % 8;
+        } else if (Number.isInteger(child.bitOffset) && Number.isInteger(child.bitSize) && byteSize > 0) {
+            // DWARF4 DW_AT_bit_offset 是从存储单元高位端计数；ELF32 已限定小端。
+            bitOffset = byteSize * 8 - child.bitOffset - child.bitSize;
+        }
         const member = {
             name,
             offset,
@@ -720,6 +780,10 @@ function _collectMembers(typeDieOff, dies, childrenMap, typeCache, depth) {
             watchType: memberType.watchType,
             kind: memberType.kind
         };
+        if (Number.isInteger(child.bitSize) && child.bitSize > 0 && Number.isInteger(bitOffset) && bitOffset >= 0) {
+            member.bitSize = child.bitSize;
+            member.bitOffset = bitOffset;
+        }
         // 若成员本身是复合类型，附加嵌套布局信息（按需，延迟到 UI 展开）
         if (memberType.kind === "struct" || memberType.kind === "union" || memberType.kind === "array") {
             member.memberTypeRef = child.typeRef;
@@ -734,7 +798,7 @@ function _buildArrayLayout(typeDieOff, dies, childrenMap, typeCache, depth) {
     const typeDie = dies.get(typeDieOff);
     const elementType =
         typeDie && typeDie.typeRef !== undefined
-            ? _resolveTypeInfo(typeDie.typeRef, dies, typeCache)
+            ? _resolveTypeInfo(typeDie.typeRef, dies, childrenMap, typeCache)
             : { kind: "unknown", typeName: "", watchType: "", byteSize: 0 };
     const dimensions = [];
     const childOffsets = childrenMap.get(typeDieOff);
@@ -823,7 +887,7 @@ function buildCompositeLayouts(parsed) {
         const name = v.name || "";
         if (!name || result.has(name)) continue;
         if (v.typeRef === undefined) continue;
-        const typeInfo = _resolveTypeInfo(v.typeRef, dies, typeCache);
+        const typeInfo = _resolveTypeInfo(v.typeRef, dies, childrenMap, typeCache);
         if (typeInfo.kind !== "struct" && typeInfo.kind !== "union" && typeInfo.kind !== "array") continue;
         const layout = _buildCompositeLayout(v.typeRef, dies, childrenMap, typeCache, 0);
         if (layout) {
@@ -871,4 +935,12 @@ function parseDwarf(buffer) {
     }
 }
 
-module.exports = { parseDwarf, parseDwarfVariableTypes, parseCompositeLayout, encodingToWatchType, readULEB, readSLEB };
+module.exports = {
+    parseDwarf,
+    parseDwarfVariableTypes,
+    parseCompositeLayout,
+    encodingToWatchType,
+    readULEB,
+    readSLEB,
+    _debugSectionData: debugSectionData
+};

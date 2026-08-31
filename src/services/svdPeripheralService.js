@@ -22,7 +22,7 @@ function integer(value, label, options = {}) {
     const raw = text(value).replace(/_/g, "");
     if (!raw && options.optional) return undefined;
     let parsed;
-    if (/^#?[01]+$/i.test(raw)) parsed = BigInt(`0b${raw.replace(/^#/, "")}`);
+    if (/^#[01]+$/i.test(raw)) parsed = BigInt(`0b${raw.slice(1)}`);
     else if (/^0b[01]+$/i.test(raw)) parsed = BigInt(raw);
     else if (/^0x[0-9a-f]+$/i.test(raw)) parsed = BigInt(raw);
     else if (/^[+]?[0-9]+$/u.test(raw)) parsed = BigInt(raw.replace(/^[+]/u, ""));

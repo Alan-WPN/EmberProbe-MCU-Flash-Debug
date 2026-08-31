@@ -258,9 +258,11 @@ module.exports = Object.freeze({
     "oc.checking": "正在检测 OpenOCD…",
     "oc.readyVer": "OpenOCD v{version} 已就绪",
     "oc.ready": "OpenOCD 已就绪",
-    "oc.incompatibleBundled": "OpenOCD v{version} 不兼容（需要 >= {minimum}）。请升级，或点击“安装”使用插件内置 xPack OpenOCD 0.12.0-7",
+    "oc.incompatibleBundled":
+        "OpenOCD v{version} 不兼容（需要 >= {minimum}）。请升级，或点击“安装”使用插件内置 xPack OpenOCD 0.12.0-7",
     "oc.incompatibleUpgrade": "OpenOCD v{version} 不兼容（需要 >= {minimum}）。请升级 OpenOCD，然后重新选择可执行文件",
-    "oc.versionUnknownBundled": "无法识别 OpenOCD 版本（需要 >= {minimum}）。请点击“安装”使用插件内置 xPack OpenOCD 0.12.0-7，或选择兼容版本",
+    "oc.versionUnknownBundled":
+        "无法识别 OpenOCD 版本（需要 >= {minimum}）。请点击“安装”使用插件内置 xPack OpenOCD 0.12.0-7，或选择兼容版本",
     "oc.versionUnknownUpgrade": "无法识别 OpenOCD 版本（需要 >= {minimum}）。请升级后重新选择可执行文件",
     "oc.installedReadyVer": "OpenOCD v{version} 已安装并就绪",
     "oc.installedReady": "OpenOCD 已安装并就绪",
@@ -274,8 +276,10 @@ module.exports = Object.freeze({
     "oc.verifyFailed": "OpenOCD 验证未通过：{error}；原配置未更改",
     "oc.selectedUnusable": "所选文件不可用：{error}",
     "oc.noBundle": "当前平台（{platform}）暂无预置包；已打开下载页，安装后请选择 OpenOCD 路径",
-    "oc.noBundleLinux": "当前平台（{platform}）暂无预置包。请用系统包管理器安装 OpenOCD（Debian/Ubuntu：sudo apt install openocd；Fedora：sudo dnf install openocd；Arch：sudo pacman -S openocd），安装后通过\"选择 OpenOCD\"指定 /usr/bin/openocd；访问 USB 探针还需 udev 规则或相应用户组权限",
-    "oc.noBundleDarwin": "当前平台（{platform}）暂无预置包。可通过 brew install openocd 安装，或在 openocd.org 下载后通过\"选择 OpenOCD\"指定可执行文件路径",
+    "oc.noBundleLinux":
+        '当前平台（{platform}）暂无预置包。请用系统包管理器安装 OpenOCD（Debian/Ubuntu：sudo apt install openocd；Fedora：sudo dnf install openocd；Arch：sudo pacman -S openocd），安装后通过"选择 OpenOCD"指定 /usr/bin/openocd；访问 USB 探针还需 udev 规则或相应用户组权限',
+    "oc.noBundleDarwin":
+        '当前平台（{platform}）暂无预置包。可通过 brew install openocd 安装，或在 openocd.org 下载后通过"选择 OpenOCD"指定可执行文件路径',
     "oc.pickLabel": "选择 OpenOCD",
     "oc.pickExe": "OpenOCD 可执行文件",
     "oc.allFiles": "所有文件",
@@ -307,7 +311,8 @@ module.exports = Object.freeze({
     "msg.skillsInstalled": "EmberProbe Agent Skills 已安装到当前工作区",
     "msg.skillsInstalledGlobal": "EmberProbe Agent Skills 已安装到用户主目录 ~/.agents/skills",
     "msg.skillsDiffers": "已安装的 Agent Skills 与插件内置版本存在差异，可重新安装进行升级",
-    "msg.skillsModifiedBridgeWarn": "检测到已安装的 Agent Skills 被本地修改，经其发起的请求可能执行被篡改的脚本，建议重新安装",
+    "msg.skillsModifiedBridgeWarn":
+        "检测到已安装的 Agent Skills 被本地修改，经其发起的请求可能执行被篡改的脚本，建议重新安装",
     "msg.skillsManage": "管理",
     "msg.skillsUninstalled": "EmberProbe Agent Skills 已从当前项目移除",
     "msg.skillsUninstalledGlobal": "EmberProbe Agent Skills 已从全局目录移除",

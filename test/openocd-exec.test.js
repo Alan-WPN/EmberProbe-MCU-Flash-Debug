@@ -39,7 +39,7 @@ function resolver(executable = "openocd") {
         timeoutMs: 1000,
         buildCommands: () => ["init", "shutdown"],
         resolveLaunch: resolver(),
-        onLine: line => lines.push(line),
+        onLine: (line) => lines.push(line),
         spawnImpl: (_file, args) => {
             capturedArgs = args;
             process.nextTick(() => {
@@ -56,10 +56,24 @@ function resolver(executable = "openocd") {
     assert.deepStrictEqual(completed.openocdTail, lines);
     assert.strictEqual(completed.exitCode, 0);
     assert.deepStrictEqual(capturedArgs, [
-        "-s", "/trusted/openocd/scripts",
-        "-f", "/trusted/openocd/scripts/interface/cmsis-dap.cfg",
-        "-f", "/trusted/openocd/scripts/target/stm32f4x.cfg",
-        "-c", "init", "-c", "shutdown"
+        "-s",
+        "/trusted/openocd/scripts",
+        "-f",
+        "/trusted/openocd/scripts/interface/cmsis-dap.cfg",
+        "-f",
+        "/trusted/openocd/scripts/target/stm32f4x.cfg",
+        "-c",
+        "bindto 127.0.0.1",
+        "-c",
+        "tcl_port disabled",
+        "-c",
+        "gdb_port disabled",
+        "-c",
+        "telnet_port disabled",
+        "-c",
+        "init",
+        "-c",
+        "shutdown"
     ]);
 
     // 同步 spawn 失败与异步 error 事件的 ENOENT 语义必须一致。
@@ -71,9 +85,11 @@ function resolver(executable = "openocd") {
             target: "t.cfg",
             buildCommands: () => [],
             resolveLaunch: resolver("/missing/openocd"),
-            spawnImpl: () => { throw enoent; }
+            spawnImpl: () => {
+                throw enoent;
+            }
         }),
-        error => error.i18nKey === "run.notFound" && error.i18nParams.path === "/missing/openocd"
+        (error) => error.i18nKey === "run.notFound" && error.i18nParams.path === "/missing/openocd"
     );
     const errorChild = fakeChild();
     await assert.rejects(
@@ -88,7 +104,7 @@ function resolver(executable = "openocd") {
                 return errorChild;
             }
         }),
-        error => error.i18nKey === "run.notFound"
+        (error) => error.i18nKey === "run.notFound"
     );
 
     // 超时只 settle 一次并尝试终止子进程。
@@ -103,12 +119,12 @@ function resolver(executable = "openocd") {
             resolveLaunch: resolver(),
             spawnImpl: () => timeoutChild
         }),
-        error => error.code === "OPENOCD_TIMEOUT"
+        (error) => error.code === "OPENOCD_TIMEOUT"
     );
     assert.strictEqual(timeoutChild.killed, true);
 
     console.log("OpenOCD one-shot executor tests passed");
-})().catch(error => {
+})().catch((error) => {
     console.error(error);
     process.exitCode = 1;
 });

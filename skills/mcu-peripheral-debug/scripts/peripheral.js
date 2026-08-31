@@ -37,6 +37,7 @@ async function main() {
     const actions = [!!opt.list, !!opt.read, !!opt.set].filter(Boolean).length;
     if (actions > 1) throw new Error("Choose exactly one of --list, --read, or --set");
     let method = "peripherals.list";
+    /** @type {Record<string, any>} */
     let params = { query: opt.query, peripheral: opt.peripheral };
     if (opt.read) {
         method = "peripherals.read";

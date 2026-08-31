@@ -78,7 +78,7 @@ module.exports = Object.freeze({
     "sb.read": "Read",
     "sb.readingEllipsis": "Reading…",
     "sb.reread": "Re-read",
-    "sb.chipEmpty": "Click \"Read\" to get the chip family, core, debug link and run state",
+    "sb.chipEmpty": 'Click "Read" to get the chip family, core, debug link and run state',
     "sb.liveValues": "Live Read/Write",
     "sb.waiting": "Waiting",
     "sb.start": "Start",
@@ -258,10 +258,14 @@ module.exports = Object.freeze({
     "oc.checking": "Checking OpenOCD…",
     "oc.readyVer": "OpenOCD v{version} ready",
     "oc.ready": "OpenOCD ready",
-    "oc.incompatibleBundled": "OpenOCD v{version} is incompatible (requires >= {minimum}). Upgrade it, or click Install to use the bundled xPack OpenOCD 0.12.0-7",
-    "oc.incompatibleUpgrade": "OpenOCD v{version} is incompatible (requires >= {minimum}). Upgrade OpenOCD, then select the new executable",
-    "oc.versionUnknownBundled": "The OpenOCD version could not be identified (requires >= {minimum}). Click Install to use the bundled xPack OpenOCD 0.12.0-7, or select a compatible version",
-    "oc.versionUnknownUpgrade": "The OpenOCD version could not be identified (requires >= {minimum}). Upgrade OpenOCD, then select the new executable",
+    "oc.incompatibleBundled":
+        "OpenOCD v{version} is incompatible (requires >= {minimum}). Upgrade it, or click Install to use the bundled xPack OpenOCD 0.12.0-7",
+    "oc.incompatibleUpgrade":
+        "OpenOCD v{version} is incompatible (requires >= {minimum}). Upgrade OpenOCD, then select the new executable",
+    "oc.versionUnknownBundled":
+        "The OpenOCD version could not be identified (requires >= {minimum}). Click Install to use the bundled xPack OpenOCD 0.12.0-7, or select a compatible version",
+    "oc.versionUnknownUpgrade":
+        "The OpenOCD version could not be identified (requires >= {minimum}). Upgrade OpenOCD, then select the new executable",
     "oc.installedReadyVer": "OpenOCD v{version} installed and ready",
     "oc.installedReady": "OpenOCD installed and ready",
     "oc.missing": "OpenOCD not found",
@@ -273,9 +277,12 @@ module.exports = Object.freeze({
     "oc.installFailed": "OpenOCD installation failed: {error}",
     "oc.verifyFailed": "OpenOCD verification failed: {error}; the previous setting was kept",
     "oc.selectedUnusable": "The selected file is unusable: {error}",
-    "oc.noBundle": "No bundled package for this platform ({platform}); the download page was opened — select the OpenOCD path after installing",
-    "oc.noBundleLinux": "No bundled package for this platform ({platform}). Install OpenOCD with your system package manager (Debian/Ubuntu: sudo apt install openocd; Fedora: sudo dnf install openocd; Arch: sudo pacman -S openocd), then use \"Select OpenOCD\" to point at /usr/bin/openocd. USB probes also require udev rules or group membership.",
-    "oc.noBundleDarwin": "No bundled package for this platform ({platform}). Install with brew install openocd, or download from openocd.org and use \"Select OpenOCD\" to point at the executable.",
+    "oc.noBundle":
+        "No bundled package for this platform ({platform}); the download page was opened — select the OpenOCD path after installing",
+    "oc.noBundleLinux":
+        'No bundled package for this platform ({platform}). Install OpenOCD with your system package manager (Debian/Ubuntu: sudo apt install openocd; Fedora: sudo dnf install openocd; Arch: sudo pacman -S openocd), then use "Select OpenOCD" to point at /usr/bin/openocd. USB probes also require udev rules or group membership.',
+    "oc.noBundleDarwin":
+        'No bundled package for this platform ({platform}). Install with brew install openocd, or download from openocd.org and use "Select OpenOCD" to point at the executable.',
     "oc.pickLabel": "Select OpenOCD",
     "oc.pickExe": "OpenOCD executables",
     "oc.allFiles": "All files",
@@ -307,7 +314,8 @@ module.exports = Object.freeze({
     "msg.skillsInstalled": "EmberProbe Agent Skills installed into the current workspace",
     "msg.skillsInstalledGlobal": "EmberProbe Agent Skills installed to ~/.agents/skills for all projects",
     "msg.skillsDiffers": "Installed Agent Skills differ from the bundled version; reinstall to upgrade",
-    "msg.skillsModifiedBridgeWarn": "Installed Agent Skills have local modifications; requests routed through them may run tampered scripts. Reinstalling is recommended",
+    "msg.skillsModifiedBridgeWarn":
+        "Installed Agent Skills have local modifications; requests routed through them may run tampered scripts. Reinstalling is recommended",
     "msg.skillsManage": "Manage",
     "msg.skillsUninstalled": "EmberProbe Agent Skills removed from the current project",
     "msg.skillsUninstalledGlobal": "EmberProbe Agent Skills removed from the global directory",
@@ -322,7 +330,8 @@ module.exports = Object.freeze({
     "msg.mcuSelected": "MCU core selected: {name}",
     "msg.selectElfFailed": "Failed to select ELF file: {error}",
     "msg.configIncomplete": "Please fully configure the ELF file, debugger and MCU core first!",
-    "msg.needCortexDebug": "Cortex-Debug extension not found. Install it from the marketplace (marus25.cortex-debug) before debugging.",
+    "msg.needCortexDebug":
+        "Cortex-Debug extension not found. Install it from the marketplace (marus25.cortex-debug) before debugging.",
     "msg.openWorkspaceForDebug": "Open a workspace first!",
     "msg.debugConfigName": "MCU Debug (OpenOCD)",
     "msg.debugStartFailed": "Failed to start the debug session. Check the Cortex-Debug and OpenOCD configuration.",
@@ -330,7 +339,8 @@ module.exports = Object.freeze({
     "msg.downloadBusy": "A download is already running; please wait for it to finish",
     "msg.agentReadBusy": "The Agent is reading variables; try again shortly",
     "msg.debugBusy": "A debug session is starting; try again shortly",
-    "msg.liveBusyForDownload": "Live watch is running; stop it before downloading (the probe can only be used by one OpenOCD at a time)",
+    "msg.liveBusyForDownload":
+        "Live watch is running; stop it before downloading (the probe can only be used by one OpenOCD at a time)",
     "msg.chipBusyForDownload": "Reading chip info; please download later",
     "msg.debugBusyForDownload": "Cortex-Debug is using the probe; end debugging before downloading",
     "msg.downloadSuccess": "Firmware downloaded and verified",
@@ -370,8 +380,10 @@ module.exports = Object.freeze({
     "live.restoring": "Debugging ended; waiting for the probe and restoring sampling…",
     "live.needConfig": "Select a debugger and MCU target first",
     "live.needVar": "Add a variable to watch first",
-    "live.notReady": "OpenOCD not ready: run \"EmberProbe: Check OpenOCD Environment\" from the command palette to install or set the path",
-    "live.serviceExited": "OpenOCD service exited (code {code}): the probe may be busy, the config wrong, or port {port} in use",
+    "live.notReady":
+        'OpenOCD not ready: run "EmberProbe: Check OpenOCD Environment" from the command palette to install or set the path',
+    "live.serviceExited":
+        "OpenOCD service exited (code {code}): the probe may be busy, the config wrong, or port {port} in use",
     "live.probeDisconnected": "Debugger disconnected; live sampling stopped automatically",
     "live.elfFirst": "Select an ELF firmware in the sidebar first",
     "live.elfReadFail": "Cannot read ELF: {path}",

@@ -6,7 +6,15 @@ const path = require("path");
 const installer = require("../src/openocdInstaller");
 const { discoverTargetConfigs } = require("../src/openocdScripts");
 const { probeOpenOcd } = require("../src/openocdChecker");
-const { platformKey, getBundledArchive, installDir, locateOpenOcdBinary, installBundledOpenOcd, assertSafeEntryPath, OPENOCD_BIN } = installer;
+const {
+    platformKey,
+    getBundledArchive,
+    installDir,
+    locateOpenOcdBinary,
+    installBundledOpenOcd,
+    assertSafeEntryPath,
+    OPENOCD_BIN
+} = installer;
 
 // 用 async IIFE 包裹，避免与 require 一起触发模块格式歧义
 (async () => {
@@ -23,7 +31,10 @@ const { platformKey, getBundledArchive, installDir, locateOpenOcdBinary, install
             );
         }
         if (process.platform === "win32") {
-            assert.throws(() => assertSafeEntryPath(staging, "C:\\evil\\openocd.exe"), (error) => error.code === "UNSAFE_ARCHIVE_ENTRY");
+            assert.throws(
+                () => assertSafeEntryPath(staging, "C:\\evil\\openocd.exe"),
+                (error) => error.code === "UNSAFE_ARCHIVE_ENTRY"
+            );
         }
     } finally {
         fs.rmSync(staging, { recursive: true, force: true });
@@ -98,11 +109,19 @@ const { platformKey, getBundledArchive, installDir, locateOpenOcdBinary, install
         assert.strictEqual(failed.ok, false, "损坏的预置包必须安装失败");
         assert.ok(fs.existsSync(marker), "安装失败不得删除已有 OpenOCD");
         // 清理临时安装目录
-        try { fs.rmSync(destRoot, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+        try {
+            fs.rmSync(destRoot, { recursive: true, force: true });
+        } catch (e) {
+            /* ignore */
+        }
     }
 
     // 清理临时基目录
-    try { fs.rmSync(tmpBase, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+    try {
+        fs.rmSync(tmpBase, { recursive: true, force: true });
+    } catch (e) {
+        /* ignore */
+    }
 
     console.log("OpenOCD installer tests passed");
 })().catch((err) => {

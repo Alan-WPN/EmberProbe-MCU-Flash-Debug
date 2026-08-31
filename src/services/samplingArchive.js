@@ -18,6 +18,45 @@ function csvField(value) {
     return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
+function csvHeaderField(value) {
+    const text = String(value ?? "");
+    const safe = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
+    return csvField(safe);
+}
+
+function processIsAlive(pid) {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (error) {
+        return error && error.code === "EPERM";
+    }
+}
+
+function cleanupStaleSamplingArchives(parentDir, currentPid = process.pid) {
+    let names;
+    try {
+        names = fs.readdirSync(parentDir);
+    } catch {
+        return 0;
+    }
+    let removed = 0;
+    for (const name of names) {
+        const match = /^sampling-history-(\d+)-[0-9a-f]+$/i.exec(name);
+        if (!match) continue;
+        const pid = Number(match[1]);
+        if (pid === currentPid || processIsAlive(pid)) continue;
+        try {
+            fs.rmSync(path.join(parentDir, name), { recursive: true, force: true });
+            removed++;
+        } catch {
+            // 清理失败不影响当前采样会话。
+        }
+    }
+    return removed;
+}
+
 function sampleValueText(sample) {
     if (sample.valueText != null) return String(sample.valueText);
     if (sample.value == null) return null;
@@ -186,7 +225,7 @@ class SamplingArchive {
         let rowCount = 0;
         try {
             output = await fsp.open(temporaryPath, "wx", 0o600);
-            await output.write(`\uFEFFtime,${names.map(csvField).join(",")}\r\n`);
+            await output.write(`\uFEFFtime,${names.map(csvHeaderField).join(",")}\r\n`);
             const input = fs.createReadStream(this.dataPath, { start: 0, end: cutoff - 1 });
             const lines = readline.createInterface({ input, crlfDelay: Infinity });
             let batch = "";
@@ -231,4 +270,11 @@ class SamplingArchive {
     }
 }
 
-module.exports = { SamplingArchive, csvField, sampleValueText };
+module.exports = {
+    SamplingArchive,
+    csvField,
+    csvHeaderField,
+    sampleValueText,
+    cleanupStaleSamplingArchives,
+    processIsAlive
+};

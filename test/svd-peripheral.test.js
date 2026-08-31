@@ -33,6 +33,7 @@ const SVD = `<?xml version="1.0"?>
         <register><name>STATUS</name><addressOffset>8</addressOffset><access>read-only</access><readAction>clear</readAction></register>
         <register><name>FLAGS</name><addressOffset>12</addressOffset><modifiedWriteValues>oneToClear</modifiedWriteValues></register>
         <register><name>WIDE</name><addressOffset>16</addressOffset><size>64</size></register>
+        <register><name>DECIMAL</name><addressOffset>10</addressOffset></register>
         <cluster><dim>2</dim><dimIncrement>0x20</dimIncrement><name>CH%s</name><addressOffset>0x100</addressOffset>
           <register><name>CTRL</name><addressOffset>0</addressOffset><fields><field><name>EN</name><bitRange>[0:0]</bitRange></field></fields></register>
         </cluster>
@@ -80,6 +81,11 @@ class FakeDebugBridge {
     assert.strictEqual(resolveTarget(model, "GPIOA.CH1.CTRL.EN").register.address, 0x40020120);
     assert.strictEqual(resolveTarget(model, "GPIOB.MODER").register.address, 0x40020400);
     assert.strictEqual(resolveTarget(model, "GPIOA.WIDE").register.size, 64);
+    assert.strictEqual(
+        resolveTarget(model, "GPIOA.DECIMAL").register.address,
+        0x4002000a,
+        "unprefixed SVD integers are decimal, not binary"
+    );
     assert.strictEqual(decodeInteger([0x12, 0x34], "big"), 0x1234n);
     assert.deepStrictEqual([...encodeInteger(0x1234n, 2, "big")], [0x12, 0x34]);
 

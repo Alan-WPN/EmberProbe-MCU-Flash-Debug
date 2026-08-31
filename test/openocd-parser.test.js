@@ -6,11 +6,11 @@ assert.strictEqual(isSafeCfg("geehy/apm32f4x.cfg"), true);
 assert.strictEqual(isSafeCfg("../apm32f4x.cfg"), false);
 
 const cases = [
-  ["Info : CMSIS-DAP: SWD supported", "probe"],
-  ["target halted due to debug-request", "target"],
-  ["wrote 524288 bytes from file app.elf in 2.1s", "program"],
-  ["verified 524288 bytes in 0.8s", "verify"],
-  ["Error: unable to find a matching CMSIS-DAP device", "error"]
+    ["Info : CMSIS-DAP: SWD supported", "probe"],
+    ["target halted due to debug-request", "target"],
+    ["wrote 524288 bytes from file app.elf in 2.1s", "program"],
+    ["verified 524288 bytes in 0.8s", "verify"],
+    ["Error: unable to find a matching CMSIS-DAP device", "error"]
 ];
 
 for (const [line, stage] of cases) assert.strictEqual(parseLine(line)?.stage, stage, line);
@@ -55,8 +55,8 @@ assert.strictEqual(parseLine("libusb_open() failed with LIBUSB_ERROR_ACCESS")?.s
 
 // Tcl 双引号内的变量与命令替换必须被禁用，同时保留空格路径。
 assert.strictEqual(
-  quoteTclWord('C:/work/$board/[danger]/app "debug".elf'),
-  '"C:/work/\\$board/\\[danger\\]/app \\"debug\\".elf"'
+    quoteTclWord('C:/work/$board/[danger]/app "debug".elf'),
+    '"C:/work/\\$board/\\[danger\\]/app \\"debug\\".elf"'
 );
 
 const noProbe = diagnoseOpenOcdFailure(["Error: unable to find a matching CMSIS-DAP device"], { exitCode: 1 });
@@ -66,7 +66,7 @@ assert.deepStrictEqual(noProbe.details.openocdTail, ["Error: unable to find a ma
 
 const noTarget = diagnoseOpenOcdFailure(["Error: Error connecting DP: cannot read IDR"], { exitCode: 1 });
 assert.strictEqual(noTarget.code, "TARGET_NOT_CONNECTED");
-assert.ok(noTarget.suggestedActions.some(action => action.includes("SWDIO")));
+assert.ok(noTarget.suggestedActions.some((action) => action.includes("SWDIO")));
 
 const noPower = diagnoseOpenOcdFailure(["Error: target voltage 0.000 V is too low"]);
 assert.strictEqual(noPower.code, "TARGET_UNPOWERED");

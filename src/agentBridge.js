@@ -5,12 +5,21 @@ const fs = require("fs/promises");
 const path = require("path");
 
 const MAX_BODY = 64 * 1024;
-const ERROR_FIELDS = ['category', 'stage', 'likelyCause', 'retryable', 'suggestedActions', 'details', 'i18nKey', 'i18nParams'];
+const ERROR_FIELDS = [
+    "category",
+    "stage",
+    "likelyCause",
+    "retryable",
+    "suggestedActions",
+    "details",
+    "i18nKey",
+    "i18nParams"
+];
 
 function jsonReplacer(_key, value) {
-    if (typeof value === 'number' && !Number.isFinite(value)) {
-        if (Number.isNaN(value)) return 'NaN';
-        return value > 0 ? 'Infinity' : '-Infinity';
+    if (typeof value === "number" && !Number.isFinite(value)) {
+        if (Number.isNaN(value)) return "NaN";
+        return value > 0 ? "Infinity" : "-Infinity";
     }
     return value;
 }
@@ -53,14 +62,17 @@ class AgentBridge {
         this.server = http.createServer((request, response) => this._receive(request, response));
         await new Promise((resolve, reject) => {
             this.server.once("error", reject);
-            this.server.listen(0, "127.0.0.1", resolve);
+            this.server.listen(0, "127.0.0.1", () => resolve(undefined));
         });
         const descriptor = this.descriptor();
         await fs.mkdir(path.dirname(this.descriptorPath), { recursive: true });
         await fs.writeFile(this.descriptorPath, stringifyJson(descriptor, 2), { mode: 0o600 });
         if (this.pointerPath !== this.descriptorPath) {
             await fs.mkdir(path.dirname(this.pointerPath), { recursive: true });
-            await fs.writeFile(this.pointerPath, stringifyJson({ protocol: 1, descriptorPath: this.descriptorPath }, 2));
+            await fs.writeFile(
+                this.pointerPath,
+                stringifyJson({ protocol: 1, descriptorPath: this.descriptorPath }, 2)
+            );
         }
         // 升级迁移：移除旧版项目根指针，并仅在旧目录已经为空时删除目录。
         await fs.unlink(this.legacyPointerPath).catch(() => {});
@@ -90,19 +102,22 @@ class AgentBridge {
         }
         if (request.headers.authorization !== `Bearer ${this.token}`) {
             response.statusCode = 401;
-            response.end(stringifyJson({ ok: false, error: { code: "UNAUTHORIZED", message: "Invalid Agent Bridge token" } }));
+            response.end(
+                stringifyJson({ ok: false, error: { code: "UNAUTHORIZED", message: "Invalid Agent Bridge token" } })
+            );
             return;
         }
         let size = 0;
         const chunks = [];
-        request.on("data", chunk => {
+        request.on("data", (chunk) => {
             size += chunk.length;
             if (size > MAX_BODY) request.destroy();
             else chunks.push(chunk);
         });
         request.on("end", async () => {
             try {
-                if (size > MAX_BODY) throw Object.assign(new Error("Request is too large"), { code: "REQUEST_TOO_LARGE" });
+                if (size > MAX_BODY)
+                    throw Object.assign(new Error("Request is too large"), { code: "REQUEST_TOO_LARGE" });
                 const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
                 if (!/^[a-z][a-zA-Z0-9.]*$/.test(payload.method || "")) {
                     throw Object.assign(new Error("Invalid method"), { code: "INVALID_METHOD" });
@@ -111,10 +126,12 @@ class AgentBridge {
                 response.end(stringifyJson({ ok: true, result }));
             } catch (error) {
                 response.statusCode = Number(error.statusCode) || 400;
-                response.end(stringifyJson({
-                    ok: false,
-                    error: serializeError(error)
-                }));
+                response.end(
+                    stringifyJson({
+                        ok: false,
+                        error: serializeError(error)
+                    })
+                );
             }
         });
     }
@@ -122,7 +139,7 @@ class AgentBridge {
     async stop() {
         const server = this.server;
         this.server = null;
-        if (server) await new Promise(resolve => server.close(resolve));
+        if (server) await new Promise((resolve) => server.close(resolve));
         try {
             const current = JSON.parse(await fs.readFile(this.descriptorPath, "utf8"));
             if (current.token === this.token) {
@@ -136,12 +153,16 @@ class AgentBridge {
                             // 只删除已经为空的插件目录；若用户在其中放了其他文件，rmdir 会失败并安全保留。
                             await fs.rmdir(path.dirname(this.pointerPath)).catch(() => {});
                         }
-                    } catch { /* pointer may already be gone */ }
+                    } catch {
+                        /* pointer may already be gone */
+                    }
                 } else {
                     await fs.rmdir(path.dirname(this.pointerPath)).catch(() => {});
                 }
             }
-        } catch { /* descriptor may already be gone */ }
+        } catch {
+            /* descriptor may already be gone */
+        }
     }
 }
 

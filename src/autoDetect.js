@@ -6,79 +6,119 @@ const { promisify } = require("util");
 const execFileAsync = promisify(execFile);
 
 async function newestElf(vscode) {
-    const files = await vscode.workspace.findFiles('**/*.elf', '{**/node_modules/**,**/.git/**}', 200);
-    const ranked = await Promise.all(files.map(async uri => {
-        try { return { uri, mtime: (await fs.stat(uri.fsPath)).mtimeMs }; }
-        catch { return { uri, mtime: 0 }; }
-    }));
+    const files = await vscode.workspace.findFiles("**/*.elf", "{**/node_modules/**,**/.git/**}", 200);
+    const ranked = await Promise.all(
+        files.map(async (uri) => {
+            try {
+                return { uri, mtime: (await fs.stat(uri.fsPath)).mtimeMs };
+            } catch {
+                return { uri, mtime: 0 };
+            }
+        })
+    );
     ranked.sort((a, b) => b.mtime - a.mtime);
-    return ranked[0]?.uri.fsPath || '';
+    return ranked[0]?.uri.fsPath || "";
 }
 
 function targetFromText(text) {
     const value = text.toLowerCase();
+    /** @type {Array<[RegExp, string]>} */
     const rules = [
-        [/apm32f0/, 'geehy/apm32f0x.cfg'], [/apm32f1/, 'geehy/apm32f1x.cfg'],
-        [/apm32f4/, 'geehy/apm32f4x.cfg'],
-        [/stm32f0/, 'stm32f0x.cfg'], [/stm32f1/, 'stm32f1x.cfg'], [/stm32f2/, 'stm32f2x.cfg'],
-        [/stm32f3/, 'stm32f3x.cfg'], [/stm32f4/, 'stm32f4x.cfg'], [/stm32f7/, 'stm32f7x.cfg'],
-        [/stm32g0/, 'stm32g0x.cfg'], [/stm32g4/, 'stm32g4x.cfg'], [/stm32h7/, 'stm32h7x.cfg'],
-        [/stm32l0/, 'stm32l0.cfg'], [/stm32l1/, 'stm32l1.cfg'], [/stm32l4/, 'stm32l4x.cfg'],
-        [/stm32l5/, 'stm32l5x.cfg'], [/stm32u5/, 'stm32u5x.cfg'], [/stm32wb/, 'stm32wbx.cfg'],
-        [/stm32wl/, 'stm32wlx.cfg'], [/gd32vf103/, 'gd32vf103.cfg'], [/gd32e23/, 'gd32e23x.cfg'],
-        [/nrf51/, 'nordic/nrf51.cfg'], [/nrf52/, 'nordic/nrf52.cfg'], [/rp2040/, 'rp2040.cfg'],
-        [/esp32s3/, 'esp32s3.cfg'], [/esp32s2/, 'esp32s2.cfg'], [/esp32/, 'esp32.cfg']
+        [/apm32f0/, "geehy/apm32f0x.cfg"],
+        [/apm32f1/, "geehy/apm32f1x.cfg"],
+        [/apm32f4/, "geehy/apm32f4x.cfg"],
+        [/stm32f0/, "stm32f0x.cfg"],
+        [/stm32f1/, "stm32f1x.cfg"],
+        [/stm32f2/, "stm32f2x.cfg"],
+        [/stm32f3/, "stm32f3x.cfg"],
+        [/stm32f4/, "stm32f4x.cfg"],
+        [/stm32f7/, "stm32f7x.cfg"],
+        [/stm32g0/, "stm32g0x.cfg"],
+        [/stm32g4/, "stm32g4x.cfg"],
+        [/stm32h7/, "stm32h7x.cfg"],
+        [/stm32l0/, "stm32l0.cfg"],
+        [/stm32l1/, "stm32l1.cfg"],
+        [/stm32l4/, "stm32l4x.cfg"],
+        [/stm32l5/, "stm32l5x.cfg"],
+        [/stm32u5/, "stm32u5x.cfg"],
+        [/stm32wb/, "stm32wbx.cfg"],
+        [/stm32wl/, "stm32wlx.cfg"],
+        [/gd32vf103/, "gd32vf103.cfg"],
+        [/gd32e23/, "gd32e23x.cfg"],
+        [/nrf51/, "nordic/nrf51.cfg"],
+        [/nrf52/, "nordic/nrf52.cfg"],
+        [/rp2040/, "rp2040.cfg"],
+        [/esp32s3/, "esp32s3.cfg"],
+        [/esp32s2/, "esp32s2.cfg"],
+        [/esp32/, "esp32.cfg"]
     ];
-    return rules.find(([pattern]) => pattern.test(value))?.[1] || '';
+    return rules.find(([pattern]) => pattern.test(value))?.[1] || "";
 }
 
 async function detectMcu(vscode) {
     const candidates = [
-        ...(await vscode.workspace.findFiles('**/*.ioc', '{**/node_modules/**,**/.git/**}', 20)),
-        ...(await vscode.workspace.findFiles('**/{CMakeLists.txt,*.cmake,*.ld}', '{**/node_modules/**,**/.git/**}', 80))
+        ...(await vscode.workspace.findFiles("**/*.ioc", "{**/node_modules/**,**/.git/**}", 20)),
+        ...(await vscode.workspace.findFiles("**/{CMakeLists.txt,*.cmake,*.ld}", "{**/node_modules/**,**/.git/**}", 80))
     ];
     for (const uri of candidates) {
         try {
-            const content = await fs.readFile(uri.fsPath, 'utf8');
-            const target = targetFromText(content + '\n' + path.basename(uri.fsPath));
+            const content = await fs.readFile(uri.fsPath, "utf8");
+            const target = targetFromText(content + "\n" + path.basename(uri.fsPath));
             if (target) return target;
-        } catch { }
+        } catch {}
     }
-    return '';
+    return "";
 }
 
 async function usbInventory() {
-    if (process.platform === 'win32') {
+    if (process.platform === "win32") {
         try {
-            const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-PnpDevice -PresentOnly | Select-Object -ExpandProperty FriendlyName'], { timeout: 6000, windowsHide: true });
+            const { stdout } = await execFileAsync(
+                "powershell.exe",
+                [
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Get-PnpDevice -PresentOnly | Select-Object -ExpandProperty FriendlyName"
+                ],
+                { timeout: 6000, windowsHide: true }
+            );
             if (stdout && stdout.trim()) return stdout;
-        } catch { /* Get-PnpDevice may be unavailable or access-denied for non-admin VS Code. */ }
+        } catch {
+            /* Get-PnpDevice may be unavailable or access-denied for non-admin VS Code. */
+        }
         try {
             // pnputil is available on supported Windows releases and can enumerate connected
             // devices without importing the PnpDevice PowerShell module. Include every class:
             // CMSIS-DAP v2 commonly appears as HID/WinUSB rather than the USB device class.
-            const { stdout } = await execFileAsync('pnputil.exe', ['/enum-devices', '/connected'], { timeout: 6000, windowsHide: true });
-            return stdout || '';
+            const { stdout } = await execFileAsync("pnputil.exe", ["/enum-devices", "/connected"], {
+                timeout: 6000,
+                windowsHide: true
+            });
+            return stdout || "";
         } catch {
-            return '';
+            return "";
         }
     }
     try {
-        const command = process.platform === 'darwin' ? ['system_profiler', ['SPUSBDataType']] : ['lsusb', []];
+        /** @type {[string, string[]]} */
+        const command = process.platform === "darwin" ? ["system_profiler", ["SPUSBDataType"]] : ["lsusb", []];
         return (await execFileAsync(command[0], command[1], { timeout: 6000 })).stdout;
-    } catch { return ''; }
+    } catch {
+        return "";
+    }
 }
 
 function debuggerFromInventory(inventory) {
-    const devices = String(inventory || '').toLowerCase();
-    if (/st[- ]?link|stm32\s+stlink/.test(devices)) return 'stlink.cfg';
-    if (/j[- ]?link|segger/.test(devices)) return 'jlink.cfg';
+    const devices = String(inventory || "").toLowerCase();
+    if (/st[- ]?link|stm32\s+stlink/.test(devices)) return "stlink.cfg";
+    if (/j[- ]?link|segger/.test(devices)) return "jlink.cfg";
     // Accept the spellings emitted by common firmware and Windows descriptors:
     // CMSIS-DAP, CMSIS DAP, CMSIS_DAP, CMSISDAP, DAPLink and MCU-Link.
-    if (/cmsis(?:[- _]?dap)|daplink|pico\s?probe|mcu[- ]?link/.test(devices)) return 'cmsis-dap.cfg';
-    if (/xds[- ]?110/.test(devices)) return 'xds110.cfg';
-    if (/nu[- ]?link/.test(devices)) return 'nulink.cfg';
-    return '';
+    if (/cmsis(?:[- _]?dap)|daplink|pico\s?probe|mcu[- ]?link/.test(devices)) return "cmsis-dap.cfg";
+    if (/xds[- ]?110/.test(devices)) return "xds110.cfg";
+    if (/nu[- ]?link/.test(devices)) return "nulink.cfg";
+    return "";
 }
 
 async function detectDebugger() {

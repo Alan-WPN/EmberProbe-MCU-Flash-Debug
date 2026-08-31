@@ -115,12 +115,26 @@ class LiveWatchService {
                 }
                 continue;
             }
-            const type = typeMap?.get(sample.name);
-            if (!type) continue;
+            const typeSpec = typeMap?.get(sample.name);
+            if (!typeSpec) continue;
+            const type = typeof typeSpec === "string" ? typeSpec : typeSpec.type;
+            const bitfield = typeof typeSpec === "object" && Number.isInteger(typeSpec.bitSize);
+            const bitValue =
+                bitfield && sample.bytes
+                    ? this.elfSymbols.decodeBitfieldValue(sample.bytes, type, typeSpec.bitOffset, typeSpec.bitSize)
+                    : null;
             const decoded = {
                 name: sample.name,
-                value: sample.bytes ? this.elfSymbols.decodeValue(sample.bytes, type) : null,
-                valueText: sample.bytes ? this.elfSymbols.decodeValueText(sample.bytes, type) : null,
+                value: bitValue
+                    ? bitValue.value
+                    : sample.bytes
+                      ? this.elfSymbols.decodeValue(sample.bytes, type)
+                      : null,
+                valueText: bitValue
+                    ? bitValue.valueText
+                    : sample.bytes
+                      ? this.elfSymbols.decodeValueText(sample.bytes, type)
+                      : null,
                 t: time
             };
             scalarSamples.push(decoded);

@@ -16,7 +16,9 @@ function args(argv) {
 
 function parseSet(value) {
     const result = {};
-    for (const item of String(value || "").split(",").filter(Boolean)) {
+    for (const item of String(value || "")
+        .split(",")
+        .filter(Boolean)) {
         const index = item.indexOf("=");
         if (index < 1) throw new Error(`Invalid assignment: ${item}`);
         result[item.slice(0, index)] = item.slice(index + 1);
@@ -33,8 +35,9 @@ async function main() {
     process.stdout.write(JSON.stringify(result) + "\n");
 }
 
-if (require.main === module) main().catch(error => {
-    writeDiagnostic(error, { operation: process.argv.includes("--set") ? "config.set" : "config.get" });
-    process.exitCode = 1;
-});
+if (require.main === module)
+    main().catch((error) => {
+        writeDiagnostic(error, { operation: process.argv.includes("--set") ? "config.set" : "config.get" });
+        process.exitCode = 1;
+    });
 module.exports = { args, parseSet };

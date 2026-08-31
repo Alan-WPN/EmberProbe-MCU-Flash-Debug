@@ -14,8 +14,9 @@ Use the bundled `scripts/download.js` from this skill directory. Do not construc
    ```
 
 2. Report the detected ELF, target, probe, and OpenOCD executable. If detection is incomplete, stop and ask the user to connect/select the missing item. Never guess a target configuration. Notes in the JSON output explain when a USB enumeration tool is missing (for example `lsusb` on Linux).
-3. When the user explicitly asked to download or flash, rerun the same command with `--execute`.
-4. Report the ELF SHA-256 fingerprint, OpenOCD's exit code, and concise result. On failure, include the actionable tail of its output.
+3. Preflight returns `flashAuthorization.confirmationId`. Show the ELF SHA-256, target, probe, and OpenOCD executable, then ask the user to approve this one-time flash operation. Do not confirm on the user's behalf and do not reuse an ID for a changed plan.
+4. Only after the user explicitly approves, rerun the same command with `--execute --confirmation-id <id>`.
+5. Report the ELF SHA-256 fingerprint, OpenOCD's exit code, and concise result. On failure, include the actionable tail of its output.
 
 The script first reuses EmberProbe's configured ELF, MCU target, probe, and OpenOCD executable through the Agent Bridge. Missing values fall back to workspace/USB auto-detection: newest ELF by modification time, MCU hints from `.ioc`, CMake, and linker files, and the attached debug probe (Windows PnP / `pnputil`, macOS `system_profiler`, Linux `lsusb`). Explicit `--elf`, `--target`, `--probe`, or `--openocd` values always take precedence.
 

@@ -25,6 +25,7 @@ const sourceFiles = [
     "src/validation.js",
     "src/writeAuthorization.js",
     "src/peripheralWriteAuthorization.js",
+    "src/flashAuthorization.js",
     "src/probeCoordinator.js",
     "src/webviewAssets.js",
     "src/webviewTemplate.js",
@@ -118,24 +119,7 @@ const allTests = [
 // 发布元数据一致性检查只在发布流程运行，日常提交不做版本/README 声明校验。
 const releaseTests = ["test/release-consistency.test.js"];
 
-const qualityTests = [
-    "test/release-script.test.js",
-    "test/validate-release.test.js",
-    "test/probe-coordinator.test.js",
-    "test/services.test.js",
-    "test/webview-assets.test.js",
-    "test/openocd-exec.test.js",
-    "test/debug-session-bridge.test.js",
-    "test/cortex-toolchain.test.js",
-    "test/cortex-debug-integration.test.js",
-    "test/svd-services.test.js",
-    "test/svd-manager.test.js",
-    "test/svd-peripheral.test.js",
-    "test/debug-control.test.js",
-    "test/sampling-archive.test.js",
-    "test/feedback-prompt.test.js",
-    "test/hil-runner.test.js"
-];
+const qualityTests = allTests;
 
 function run(args) {
     const result = spawnSync(process.execPath, args, { cwd: root, stdio: "inherit" });

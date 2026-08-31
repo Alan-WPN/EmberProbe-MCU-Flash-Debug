@@ -19,14 +19,16 @@ function interpolate(template, params) {
 
 function t(lang, key, params) {
     const table = STRINGS[normalizeLang(lang)] || STRINGS[DEFAULT_LANG];
-    const raw = table[key] != null
-        ? table[key]
-        : (STRINGS[DEFAULT_LANG][key] != null ? STRINGS[DEFAULT_LANG][key] : key);
+    const raw = table[key] != null ? table[key] : STRINGS[DEFAULT_LANG][key] != null ? STRINGS[DEFAULT_LANG][key] : key;
     return interpolate(raw, params);
 }
 
 function matchVscodeLang(lang) {
-    return String(lang || "").toLowerCase().startsWith("zh") ? "zh" : "en";
+    return String(lang || "")
+        .toLowerCase()
+        .startsWith("zh")
+        ? "zh"
+        : "en";
 }
 
 function jsonForScript(value) {

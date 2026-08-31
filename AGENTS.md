@@ -25,3 +25,16 @@ Tests are executable Node.js files using built-in `assert`; name new files `test
 ## Commit & Pull Request Guidelines
 
 Follow the history's short, imperative subjects: `Add Cortex-Debug integration` or `Fix macOS flash skill CI path check`. Reserve `Release EmberProbe vX.Y.Z` for releases. Pull requests should explain behavior and risk, link relevant issues, note tested platforms/hardware, and include screenshots for webview changes. Confirm `npm run check`, `npm run quality`, `npm run bundle`, and relevant e2e tests pass.
+
+## Release Process
+
+Releases are tag-driven: pushing a stable `vX.Y.Z` tag triggers `.github/workflows/release.yml`, which reruns the gates, builds the VSIX, and publishes the GitHub Release. Do not run `npm run package` locally for a release — CI builds and uploads the artifact. To cut a release:
+
+1. Land the changes on `master`, then document user-facing changes under `## [Unreleased]` in `CHANGELOG.md` (the section must be non-empty).
+2. Run `npm run release:prepare -- <version> --date YYYY-MM-DD`; it syncs `package.json`, `package-lock.json`, `README.md`, `README_EN.md`, and the CHANGELOG heading. Confirm with `node scripts/validate-release.js v<version>`.
+3. Run `npm run check` and `npm run quality`; fix any failures before tagging.
+4. Commit exactly those five files as `Release EmberProbe v<version>`, then create the annotated tag with `git tag -a v<version> -m "EmberProbe v<version>"`.
+5. Push both: `git push origin master && git push origin v<version>`, then watch the run with `gh run watch`.
+6. After the workflow publishes, replace the generated notes with a concise bilingual summary that mirrors the previous release (`gh release view` to read it): numbered Chinese sections `新增`/`优化`/`修复` followed by English `Added`/`Improved`/`Fixed`, one short line each, via `gh release edit v<version> --notes-file <file>`.
+
+Tags must be stable `vX.Y.Z` (no prereleases) and must match every version reference or validation fails; never re-point a published tag. If the workflow fails after tagging, retry it with `gh workflow run release.yml -f tag=v<version>`. Full details: `docs/RELEASING.md`.

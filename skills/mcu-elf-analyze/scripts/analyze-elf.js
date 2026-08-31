@@ -24,8 +24,9 @@ async function main() {
     process.stdout.write(JSON.stringify(result) + "\n");
 }
 
-if (require.main === module) main().catch(error => {
-    writeDiagnostic(error, { operation: "elf.analyze" });
-    process.exitCode = 1;
-});
+if (require.main === module)
+    main().catch((error) => {
+        writeDiagnostic(error, { operation: "elf.analyze" });
+        process.exitCode = 1;
+    });
 module.exports = { args };

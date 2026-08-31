@@ -8,7 +8,7 @@ const { siblingNm, resolveCortexToolchain } = require("../src/services/cortexToo
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-cortex-tools-")));
 try {
-    const touch = name => {
+    const touch = (name) => {
         const file = path.join(root, name);
         fs.writeFileSync(file, "tool");
         fs.chmodSync(file, 0o755);
@@ -17,9 +17,16 @@ try {
     const objdump = touch("arm-none-eabi-objdump");
     const nm = touch("arm-none-eabi-nm");
     assert.strictEqual(siblingNm(objdump), nm);
-    assert.deepStrictEqual(resolveCortexToolchain({ envPath: root, platform: "linux" }), { objdumpPath: objdump, nmPath: nm });
+    assert.deepStrictEqual(resolveCortexToolchain({ envPath: root, platform: "linux" }), {
+        objdumpPath: objdump,
+        nmPath: nm
+    });
     assert.deepStrictEqual(
-        resolveCortexToolchain({ configuredObjdump: path.join(root, "objdump-multiarch"), envPath: root, platform: "linux" }),
+        resolveCortexToolchain({
+            configuredObjdump: path.join(root, "objdump-multiarch"),
+            envPath: root,
+            platform: "linux"
+        }),
         { objdumpPath: objdump, nmPath: nm },
         "a missing multiarch pair should fall back to a complete arm-none-eabi pair"
     );

@@ -29,7 +29,22 @@ function runOpenOcdOnce(options) {
     } catch (error) {
         return Promise.reject(error);
     }
-    const args = ["-s", launch.scriptsRoot, "-f", launch.probePath, "-f", launch.targetPath];
+    const args = [
+        "-s",
+        launch.scriptsRoot,
+        "-f",
+        launch.probePath,
+        "-f",
+        launch.targetPath,
+        "-c",
+        "bindto 127.0.0.1",
+        "-c",
+        "tcl_port disabled",
+        "-c",
+        "gdb_port disabled",
+        "-c",
+        "telnet_port disabled"
+    ];
     for (const command of commands) args.push("-c", command);
     const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 15000;
     const tailLimit = Number(options.tailLimit) > 0 ? Number(options.tailLimit) : 20;
@@ -78,6 +93,15 @@ function runOpenOcdOnce(options) {
             } catch (error) {
                 // 进程可能已经退出，保留原超时语义。
             }
+            setTimeout(() => {
+                if (child.exitCode == null && child.signalCode == null) {
+                    try {
+                        child.kill("SIGKILL");
+                    } catch (error) {
+                        // 进程可能已经退出。
+                    }
+                }
+            }, 500).unref?.();
             const timeoutError =
                 typeof options.buildTimeoutError === "function"
                     ? options.buildTimeoutError(timeoutMs)

@@ -17,7 +17,10 @@ function args(argv) {
 // 解析 --set 的 name=value 对（逗号分隔）；变量名可含路径语法（sensor.x / buf[0]）
 function parseSet(text) {
     const values = [];
-    for (const part of String(text || "").split(",").map(s => s.trim()).filter(Boolean)) {
+    for (const part of String(text || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)) {
         const eq = part.indexOf("=");
         if (eq <= 0 || eq === part.length - 1) throw new Error(`Invalid assignment (expected name=value): ${part}`);
         const name = part.slice(0, eq).trim();
@@ -32,7 +35,8 @@ async function main() {
     const opt = args(process.argv.slice(2));
     const workspace = opt.workspace || process.cwd();
     if (opt["reset-permission"]) {
-        if (opt.set || opt.confirm || opt.remember) throw new Error("--reset-permission cannot be combined with write arguments");
+        if (opt.set || opt.confirm || opt.remember)
+            throw new Error("--reset-permission cannot be combined with write arguments");
         const result = await call(workspace, "variables.write.permission", { action: "reset" });
         process.stdout.write(JSON.stringify(result) + "\n");
         return;
@@ -48,8 +52,11 @@ async function main() {
     process.stdout.write(JSON.stringify(result) + "\n");
 }
 
-if (require.main === module) main().catch(error => {
-    writeDiagnostic(error, { operation: process.argv.includes("--reset-permission") ? "variables.write.permission" : "variables.write" });
-    process.exitCode = 1;
-});
+if (require.main === module)
+    main().catch((error) => {
+        writeDiagnostic(error, {
+            operation: process.argv.includes("--reset-permission") ? "variables.write.permission" : "variables.write"
+        });
+        process.exitCode = 1;
+    });
 module.exports = { args, parseSet };

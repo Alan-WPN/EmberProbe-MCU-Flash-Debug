@@ -70,7 +70,7 @@ node <skill-dir>/scripts/read-live.js --workspace <workspace> --export-csv --var
 - Use `--panel 2` to target a specific chart slot instead of the focused panel.
 - Prefer `--last <seconds>` for relative ranges. For absolute ranges, use complete ISO 8601 UTC timestamps ending in `Z`, ideally copied from sample/CSV timestamps (for example `2026-08-24T12:42:00.000Z`). The default end is the command invocation time; omitting the start selects the whole buffer.
 - Bare `HH:MM[:SS]` is supported only as local wall-clock input and is resolved in the machine running the Skill, not as UTC. Do not derive a bare clock from a UTC timestamp. On failure, inspect `details.requestedRange.resolvedUtc`, `localTimeZone`, and `localUtcOffset` before retrying.
-- With `--output`, write the RFC 4180 CSV file and return metadata. Without it, return the CSV text in the JSON result so the agent can inspect or transform it without creating a file.
+- With `--output`, pass a relative path inside the workspace (for example `exports/live.csv`); absolute paths, `..` escapes, and symlink escapes are rejected. The command writes the RFC 4180 CSV file and returns metadata. Without it, return the CSV text in the JSON result so the agent can inspect or transform it without creating a file.
 - CSV values prefer exact `valueText`, matching the chart export dialog. An open chart panel with buffered samples is required; this command does not start a new sampling run.
 
 ## Trends

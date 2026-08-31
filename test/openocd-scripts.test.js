@@ -4,7 +4,11 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const {
-    isSafeCfgPath, findScriptsRoot, discoverTargetConfigs, discoverInterfaceConfigs, resolveOpenOcdLaunch
+    isSafeCfgPath,
+    findScriptsRoot,
+    discoverTargetConfigs,
+    discoverInterfaceConfigs,
+    resolveOpenOcdLaunch
 } = require("../src/openocdScripts");
 
 assert.strictEqual(isSafeCfgPath("stm32f4x.cfg"), true);
@@ -43,7 +47,9 @@ try {
     );
     assert.deepStrictEqual(discoverTargetConfigs(executable), ["geehy/apm32f4x.cfg", "stm32f4x.cfg"]);
     assert.deepStrictEqual(discoverInterfaceConfigs(executable), [
-        "ch347.cfg", "cmsis-dap.cfg", "wch/vendor-probe.cfg"
+        "ch347.cfg",
+        "cmsis-dap.cfg",
+        "wch/vendor-probe.cfg"
     ]);
     const launch = resolveOpenOcdLaunch(executable, "cmsis-dap.cfg", "geehy/apm32f4x.cfg");
     assert.strictEqual(launch.scriptsRoot, fs.realpathSync(path.join(temp, "openocd", "scripts")));
@@ -52,7 +58,7 @@ try {
     assert.strictEqual(launch.targetPath, fs.realpathSync(path.join(target, "geehy", "apm32f4x.cfg")));
     assert.throws(
         () => resolveOpenOcdLaunch(executable, "missing.cfg", "stm32f4x.cfg"),
-        error => error.code === "OPENOCD_CONFIG_NOT_FOUND"
+        (error) => error.code === "OPENOCD_CONFIG_NOT_FOUND"
     );
 } finally {
     fs.rmSync(temp, { recursive: true, force: true });

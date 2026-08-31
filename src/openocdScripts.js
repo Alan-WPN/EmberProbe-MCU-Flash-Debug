@@ -10,7 +10,7 @@ function isSafeCfgPath(value) {
     if (typeof value !== "string" || !value.endsWith(".cfg") || value.includes("\\")) return false;
     if (value.startsWith("/") || /[\x00-\x1f:]/.test(value)) return false;
     const parts = value.split("/");
-    return parts.length > 0 && parts.every(part => part && part !== "." && part !== "..");
+    return parts.length > 0 && parts.every((part) => part && part !== "." && part !== "..");
 }
 
 function resolveExecutablePath(executable) {
@@ -18,21 +18,35 @@ function resolveExecutablePath(executable) {
     if (!configured) return "";
     if (configured.includes("/") || configured.includes("\\")) {
         const absolute = path.resolve(configured);
-        try { return fs.realpathSync(absolute); } catch (error) { return absolute; }
+        try {
+            return fs.realpathSync(absolute);
+        } catch (error) {
+            return absolute;
+        }
     }
-    const pathEntries = String(process.env.PATH || "").split(path.delimiter).filter(Boolean);
-    const extensions = process.platform === "win32"
-        ? String(process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)
-        : [""];
+    const pathEntries = String(process.env.PATH || "")
+        .split(path.delimiter)
+        .filter(Boolean);
+    const extensions =
+        process.platform === "win32"
+            ? String(process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM")
+                  .split(";")
+                  .filter(Boolean)
+            : [""];
     for (const entry of pathEntries) {
         for (const extension of extensions) {
-            const candidate = path.join(entry, process.platform === "win32" && !path.extname(configured)
-                ? configured + extension.toLowerCase()
-                : configured);
+            const candidate = path.join(
+                entry,
+                process.platform === "win32" && !path.extname(configured)
+                    ? configured + extension.toLowerCase()
+                    : configured
+            );
             try {
                 fs.accessSync(candidate, fs.constants.X_OK);
                 return fs.realpathSync(candidate);
-            } catch (error) { /* try the next PATH entry */ }
+            } catch (error) {
+                /* try the next PATH entry */
+            }
         }
     }
     return configured;
@@ -50,7 +64,7 @@ function scriptsRootCandidates(executable) {
         // System packages and EmberProbe's bundled build use share/openocd/scripts/.
         path.join(prefix, "share", "openocd", "scripts")
     ].filter(Boolean);
-    return [...new Set(candidates.map(candidate => path.resolve(candidate)))];
+    return [...new Set(candidates.map((candidate) => path.resolve(candidate)))];
 }
 
 function resolveConfigFile(scriptsRoot, kind, config) {
@@ -60,8 +74,9 @@ function resolveConfigFile(scriptsRoot, kind, config) {
     const base = fs.realpathSync(path.join(scriptsRoot, kind));
     const candidate = path.join(base, ...config.split("/"));
     let resolved;
-    try { resolved = fs.realpathSync(candidate); }
-    catch (error) {
+    try {
+        resolved = fs.realpathSync(candidate);
+    } catch (error) {
         throw Object.assign(new Error(`OpenOCD 配置脚本不存在：${kind}/${config}`), {
             code: "OPENOCD_CONFIG_NOT_FOUND",
             details: { candidate }
@@ -98,15 +113,20 @@ function findScriptsRoot(executable) {
     for (const candidate of scriptsRootCandidates(executable)) {
         try {
             if (fs.statSync(path.join(candidate, "target")).isDirectory()) return candidate;
-        } catch (error) { /* try the next supported layout */ }
+        } catch (error) {
+            /* try the next supported layout */
+        }
     }
     return "";
 }
 
 function walkCfgFiles(root, current = root, output = []) {
     let entries;
-    try { entries = fs.readdirSync(current, { withFileTypes: true }); }
-    catch (error) { return output; }
+    try {
+        entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch (error) {
+        return output;
+    }
     for (const entry of entries) {
         const absolute = path.join(current, entry.name);
         if (entry.isDirectory()) walkCfgFiles(root, absolute, output);
@@ -121,15 +141,17 @@ function walkCfgFiles(root, current = root, output = []) {
 function discoverTargetConfigs(executable) {
     const scriptsRoot = findScriptsRoot(executable);
     if (!scriptsRoot) return [];
-    return walkCfgFiles(path.join(scriptsRoot, "target"))
-        .sort((a, b) => a.localeCompare(b, "en", { numeric: true, sensitivity: "base" }));
+    return walkCfgFiles(path.join(scriptsRoot, "target")).sort((a, b) =>
+        a.localeCompare(b, "en", { numeric: true, sensitivity: "base" })
+    );
 }
 
 function discoverInterfaceConfigs(executable) {
     const scriptsRoot = findScriptsRoot(executable);
     if (!scriptsRoot) return [];
-    return walkCfgFiles(path.join(scriptsRoot, "interface"))
-        .sort((a, b) => a.localeCompare(b, "en", { numeric: true, sensitivity: "base" }));
+    return walkCfgFiles(path.join(scriptsRoot, "interface")).sort((a, b) =>
+        a.localeCompare(b, "en", { numeric: true, sensitivity: "base" })
+    );
 }
 
 module.exports = {

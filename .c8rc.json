@@ -1,13 +1,20 @@
 {
   "all": true,
-  "include": [
-    "src/probeCoordinator.js",
-    "src/webviewAssets.js",
-    "src/services/**/*.js",
-    "scripts/release.js",
-    "test/hil/run-hil.js"
+  "include": ["src/**/*.js", "skills/**/*.js", "scripts/**/*.js", "test/hil/run-hil.js"],
+  "exclude": [
+    "test/**",
+    "src/extension.js",
+    "src/mainViewProvider.js",
+    "src/modernView.js",
+    "src/liveWatchView.js",
+    "src/autoDetect.js",
+    "src/chipInfo.js",
+    "src/openocdInstaller.js",
+    "src/webview/**/*.js",
+    "src/i18n/**/*.js",
+    "scripts/extract-webview-assets.js",
+    "scripts/split-i18n.js"
   ],
-  "exclude": ["test/**"],
   "reporter": ["text", "json-summary"],
   "reports-dir": "coverage",
   "check-coverage": true,

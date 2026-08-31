@@ -23,38 +23,71 @@ assert.strictEqual(DEFAULT_STAR_INTERVAL_MS, 7 * DAY_MS, "star prompt cycle shou
 assert.strictEqual(DEFAULT_ISSUE_SNOOZE_MS, DAY_MS, "feedback snooze should default to 24 hours");
 
 // --- resolvePrompt 纯函数:首启、周期、互斥、静默与畸形状态 ---
-assert.strictEqual(resolvePrompt({}, 1000, { random: () => 0 }).kind, "issue", "first run should show a feedback prompt before any star cycle elapsed");
-assert.strictEqual(resolvePrompt({}, 1000, { random: () => 0.9 }).kind, "feature", "first run should be able to pick the feature variant");
+assert.strictEqual(
+    resolvePrompt({}, 1000, { random: () => 0 }).kind,
+    "issue",
+    "first run should show a feedback prompt before any star cycle elapsed"
+);
+assert.strictEqual(
+    resolvePrompt({}, 1000, { random: () => 0.9 }).kind,
+    "feature",
+    "first run should be able to pick the feature variant"
+);
 
 const starDueState = { firstActivatedAt: 0, starNextEligibleAt: 0, issueSnoozedUntil: 0 };
-assert.strictEqual(resolvePrompt(starDueState, 5000, { random: () => 0 }).kind, "star", "a due star prompt must win over the feedback slot");
+assert.strictEqual(
+    resolvePrompt(starDueState, 5000, { random: () => 0 }).kind,
+    "star",
+    "a due star prompt must win over the feedback slot"
+);
 assert.strictEqual(
     resolvePrompt({ ...starDueState, starred: true }, 5000, { random: () => 0 }).kind,
     "issue",
     "after starring, the feedback slot takes over and star never returns"
 );
-assert.strictEqual(resolvePrompt({}, 1000, { starIntervalMs: 12345, random: () => 0.9 }).kind, "feature", "star interval should be injectable");
+assert.strictEqual(
+    resolvePrompt({}, 1000, { starIntervalMs: 12345, random: () => 0.9 }).kind,
+    "feature",
+    "star interval should be injectable"
+);
 
-assert.strictEqual(resolvePrompt({ issueSnoozedUntil: 5000 }, 4999).kind, null, "a snoozed feedback slot stays hidden before the timestamp");
-assert.strictEqual(resolvePrompt({ issueSnoozedUntil: 5000 }, 5000, { random: () => 0.9 }).kind, "feature", "the snooze expires on the timestamp itself");
+assert.strictEqual(
+    resolvePrompt({ issueSnoozedUntil: 5000 }, 4999).kind,
+    null,
+    "a snoozed feedback slot stays hidden before the timestamp"
+);
+assert.strictEqual(
+    resolvePrompt({ issueSnoozedUntil: 5000 }, 5000, { random: () => 0.9 }).kind,
+    "feature",
+    "the snooze expires on the timestamp itself"
+);
 assert.strictEqual(
     resolvePrompt({ starNextEligibleAt: 9000, issueSnoozedUntil: 5000 }, 1000).kind,
     null,
     "no prompt while the star cycle is running and the feedback slot is snoozed"
 );
 
-const junkKind = resolvePrompt({ starred: "yes", starNextEligibleAt: "soon", issueSnoozedUntil: null, firstActivatedAt: undefined }, 1000).kind;
-assert.ok(junkKind === "issue" || junkKind === "feature", "malformed stored state must fall back to defaults instead of crashing or showing star");
+const junkKind = resolvePrompt(
+    { starred: "yes", starNextEligibleAt: "soon", issueSnoozedUntil: null, firstActivatedAt: undefined },
+    1000
+).kind;
+assert.ok(
+    junkKind === "issue" || junkKind === "feature",
+    "malformed stored state must fall back to defaults instead of crashing or showing star"
+);
 
 const defaultRandomKind = resolvePrompt({}, 5000).kind;
-assert.ok(defaultRandomKind === "issue" || defaultRandomKind === "feature", "with real Math.random the feedback slot resolves to one of its two variants");
+assert.ok(
+    defaultRandomKind === "issue" || defaultRandomKind === "feature",
+    "with real Math.random the feedback slot resolves to one of its two variants"
+);
 
 // --- 服务:globalState 持久化、openExternal 只允许常量 URL ---
 function fakeGlobalState(seed) {
     const map = new Map(Object.entries(seed || {}));
     return {
         map,
-        get: key => map.get(key),
+        get: (key) => map.get(key),
         async update(key, value) {
             map.set(key, value);
         }
@@ -66,12 +99,12 @@ function fakeVscode() {
     return {
         opened,
         env: {
-            openExternal: async uri => {
+            openExternal: async (uri) => {
                 opened.push(uri.toString());
             }
         },
         Uri: {
-            parse: url => ({ toString: () => url })
+            parse: (url) => ({ toString: () => url })
         }
     };
 }
@@ -84,7 +117,10 @@ async function serviceScenario() {
     const first = service.resolve();
     assert.ok(first.kind === "issue" || first.kind === "feature", "first resolve should pick a feedback variant");
     const initialized = state.map.get(STATE_KEY);
-    assert.ok(initialized && Number.isFinite(initialized.firstActivatedAt), "first resolve should persist the activation timestamp");
+    assert.ok(
+        initialized && Number.isFinite(initialized.firstActivatedAt),
+        "first resolve should persist the activation timestamp"
+    );
     assert.strictEqual(
         initialized.starNextEligibleAt - initialized.firstActivatedAt,
         DEFAULT_STAR_INTERVAL_MS,
@@ -112,7 +148,10 @@ async function serviceScenario() {
 
     await service.snooze("feature");
     const snoozedUntil = state.map.get(STATE_KEY).issueSnoozedUntil;
-    assert.ok(snoozedUntil >= Date.now() + DEFAULT_ISSUE_SNOOZE_MS - 50, "snooze should push the feedback slot past the default window");
+    assert.ok(
+        snoozedUntil >= Date.now() + DEFAULT_ISSUE_SNOOZE_MS - 50,
+        "snooze should push the feedback slot past the default window"
+    );
     await service.snooze("issue");
     assert.strictEqual(
         state.map.get(STATE_KEY).issueSnoozedUntil,
@@ -124,7 +163,11 @@ async function serviceScenario() {
 
     const beforeStarDismiss = { ...state.map.get(STATE_KEY) };
     await service.snooze("star");
-    assert.deepStrictEqual(state.map.get(STATE_KEY), beforeStarDismiss, "dismissing the star prompt must not touch feedback state");
+    assert.deepStrictEqual(
+        state.map.get(STATE_KEY),
+        beforeStarDismiss,
+        "dismissing the star prompt must not touch feedback state"
+    );
 
     assert.strictEqual(await service.open("bogus"), false, "open rejects unknown kinds");
     assert.strictEqual(vscodeFake.opened.length, 2, "rejected kinds must not open anything");
@@ -132,13 +175,21 @@ async function serviceScenario() {
     // 直接改写存储(模拟静默到期)→ 反馈位恢复显示
     state.map.set(STATE_KEY, { ...state.map.get(STATE_KEY), issueSnoozedUntil: Date.now() - 1 });
     const revived = service.resolve();
-    assert.ok(revived.kind === "issue" || revived.kind === "feature", "an expired snooze must revive the feedback slot");
+    assert.ok(
+        revived.kind === "issue" || revived.kind === "feature",
+        "an expired snooze must revive the feedback slot"
+    );
 
     // 预置畸形状态 → 服务仍能工作
-    const junkState = fakeGlobalState({ [STATE_KEY]: { starred: "no", starNextEligibleAt: null, issueSnoozedUntil: "x" } });
+    const junkState = fakeGlobalState({
+        [STATE_KEY]: { starred: "no", starNextEligibleAt: null, issueSnoozedUntil: "x" }
+    });
     const junkService = new FeedbackPromptService({ vscode: fakeVscode(), context: { globalState: junkState } });
     const junkResolved = junkService.resolve();
-    assert.ok(junkResolved.kind === "issue" || junkResolved.kind === "feature", "service must tolerate a corrupted stored state");
+    assert.ok(
+        junkResolved.kind === "issue" || junkResolved.kind === "feature",
+        "service must tolerate a corrupted stored state"
+    );
     await junkService.snooze("issue");
     assert.ok(junkState.map.get(STATE_KEY).starred === false, "repaired state should keep the boolean default");
 }
@@ -147,20 +198,37 @@ async function serviceScenario() {
     await serviceScenario();
 
     // --- 侧边栏模板与渲染器接线 ---
-    const sidebarHtml = modernView.getModernWebviewContent({ elf: "app.elf", debugger: "stlink.cfg", mcu: "stm32f4x.cfg" }, "zh");
-    const scripts = Array.from(sidebarHtml.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g), match => match[1]);
+    const sidebarHtml = modernView.getModernWebviewContent(
+        { elf: "app.elf", debugger: "stlink.cfg", mcu: "stm32f4x.cfg" },
+        "zh"
+    );
+    const scripts = Array.from(sidebarHtml.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g), (match) => match[1]);
     assert.ok(scripts.length > 0, "sidebar should contain scripts");
     scripts.forEach((script, index) => new vm.Script(script, { filename: `feedback-sidebar-${index}.js` }));
     assert.ok(sidebarHtml.includes('id="feedbackPrompt"'), "sidebar template should contain the feedback prompt shell");
-    assert.ok(sidebarHtml.includes("m.type==='feedbackPrompt'"), "sidebar renderer should react to feedbackPrompt broadcasts");
-    assert.ok(sidebarHtml.includes("feedbackPromptAction"), "sidebar renderer should report prompt actions back to the host");
+    assert.match(
+        sidebarHtml,
+        /m\.type\s*===\s*["']feedbackPrompt["']/,
+        "sidebar renderer should react to feedbackPrompt broadcasts"
+    );
+    assert.ok(
+        sidebarHtml.includes("feedbackPromptAction"),
+        "sidebar renderer should report prompt actions back to the host"
+    );
     assert.ok(sidebarHtml.includes(".feedback-prompt"), "feedback prompt should ship its own styles");
     assert.ok(sidebarHtml.includes("fb.featureText"), "feature-variant copy must be wired into the renderer");
 
     // --- host 接线:解析入口 + 白名单 action 分支 ---
     const providerSource = fs.readFileSync(require.resolve("../src/mainViewProvider"), "utf8");
-    assert.ok(providerSource.includes("case 'feedbackPromptAction'"), "host must whitelist and handle prompt actions");
-    assert.ok(providerSource.includes("this._feedbackPromptService.resolve()"), "host must resolve the prompt when the sidebar initializes");
+    assert.match(
+        providerSource,
+        /case\s+["']feedbackPromptAction["']/,
+        "host must whitelist and handle prompt actions"
+    );
+    assert.ok(
+        providerSource.includes("this._feedbackPromptService.resolve()"),
+        "host must resolve the prompt when the sidebar initializes"
+    );
 
     // --- i18n:zh/en 键一一对应 ---
     const FB_KEYS = ["fb.starText", "fb.issueText", "fb.featureText", "fb.openTitle", "fb.dismissTitle"];
@@ -172,7 +240,7 @@ async function serviceScenario() {
     assert.ok(i18n.t("en", "fb.featureText").includes("issue"), "feature copy should point at issues");
 
     console.log("feedback-prompt tests passed");
-})().catch(error => {
+})().catch((error) => {
     console.error(error);
     process.exit(1);
 });

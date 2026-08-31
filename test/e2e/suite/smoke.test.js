@@ -34,13 +34,13 @@ async function run() {
     console.log("✓ contributes bounded live-watch defaults");
 
     await vscode.commands.executeCommand("workbench.view.extension.mcu-vscode-container");
-    await new Promise(resolve => setTimeout(resolve, 300));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     assert.ok(
         !fs.existsSync(path.join(workspace, ".emberprobe")),
         "opening the EmberProbe view without workspace Skills must not create .emberprobe"
     );
     await vscode.commands.executeCommand("mcu-vscode.openLiveWatch");
-    await new Promise(resolve => setTimeout(resolve, 300));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     assert.ok(
         !fs.existsSync(path.join(workspace, ".emberprobe")),
         "ordinary EmberProbe commands without workspace Skills must not create .emberprobe"

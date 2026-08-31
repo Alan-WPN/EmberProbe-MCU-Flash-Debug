@@ -54,7 +54,7 @@ const { inspectSkill, installSkill, uninstallSkill, inspectSkills } = require(".
         fs.unlinkSync(path.join(workspace, ".agents", "skills", "mcu-chip-info", "scripts", "read-chip.js"));
         const partial = await inspectSkills(vscode, context);
         assert.strictEqual(partial.state, "partial");
-        assert.strictEqual(partial.skills.find(item => item.name === "mcu-chip-info").state, "partial");
+        assert.strictEqual(partial.skills.find((item) => item.name === "mcu-chip-info").state, "partial");
 
         // 全局安装不要求工作区,与项目范围相互独立
         const globalInstall = await installSkill(noWorkspaceVscode, context, "en", "global");
@@ -62,6 +62,20 @@ const { inspectSkill, installSkill, uninstallSkill, inspectSkills } = require(".
         assert.strictEqual(globalInstall.scopes.global.state, "installed");
         assert.strictEqual(globalInstall.scopes.workspace, null);
         assert.ok(fs.existsSync(path.join(home, ".agents", "skills", "mcu-chip-info", "SKILL.md")));
+        const workspaceStillWins = await inspectSkills(vscode, context);
+        assert.strictEqual(
+            workspaceStillWins.state,
+            "partial",
+            "a clean global copy must not hide the workspace copy that agents resolve first"
+        );
+
+        const staleExtra = path.join(workspace, ".agents", "skills", "mcu-download", "scripts", "stale.js");
+        fs.writeFileSync(staleExtra, "stale");
+        await installSkill(vscode, context, "en", "workspace");
+        assert.ok(
+            !fs.existsSync(staleExtra),
+            "reinstall must replace EmberProbe-owned skill directories instead of merging extras"
+        );
 
         // 项目范围卸载:只移除 manifest 内 skill 与共享运行时,保留用户自建 skill
         fs.mkdirSync(path.join(workspace, ".agents", "skills", "user-skill"), { recursive: true });
@@ -71,8 +85,14 @@ const { inspectSkill, installSkill, uninstallSkill, inspectSkills } = require(".
         assert.strictEqual(uninstalled.scopes.workspace.state, "notInstalled");
         assert.ok(!fs.existsSync(path.join(workspace, ".agents", "skills", "_emberprobe")));
         assert.ok(!fs.existsSync(path.join(workspace, ".agents", "skills", "mcu-chip-info")));
-        assert.ok(fs.existsSync(path.join(workspace, ".agents", "skills", "user-skill")), "user-created skills must be preserved");
-        assert.ok(!fs.existsSync(path.join(workspace, ".emberprobe")), "workspace uninstall must remove the Bridge pointer directory");
+        assert.ok(
+            fs.existsSync(path.join(workspace, ".agents", "skills", "user-skill")),
+            "user-created skills must be preserved"
+        );
+        assert.ok(
+            !fs.existsSync(path.join(workspace, ".emberprobe")),
+            "workspace uninstall must remove the Bridge pointer directory"
+        );
 
         // 全局卸载后目录已空,应整体移除 skills 目录
         const globalUninstall = await uninstallSkill(vscode, context, "en", "global");
@@ -85,7 +105,7 @@ const { inspectSkill, installSkill, uninstallSkill, inspectSkills } = require(".
         fs.rmSync(home, { recursive: true, force: true });
     }
     console.log("Skill installer tests passed");
-})().catch(error => {
+})().catch((error) => {
     console.error(error);
     process.exitCode = 1;
 });

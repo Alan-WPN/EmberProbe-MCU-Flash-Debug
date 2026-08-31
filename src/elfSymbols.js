@@ -4,53 +4,80 @@
 
 const elfFormat = require("./elfFormat");
 
-const SUPPORTED_TYPES = ['u8', 'i8', 'u16', 'i16', 'u32', 'i32', 'f32', 'u64', 'i64', 'f64'];
+const SUPPORTED_TYPES = ["u8", "i8", "u16", "i16", "u32", "i32", "f32", "u64", "i64", "f64"];
 
 // 各标量类型的字节宽度
 function typeByteLength(type) {
     switch (type) {
-        case 'u8': case 'i8': return 1;
-        case 'u16': case 'i16': return 2;
-        case 'u32': case 'i32': case 'f32': return 4;
-        case 'u64': case 'i64': case 'f64': return 8;
-        default: return 4;
+        case "u8":
+        case "i8":
+            return 1;
+        case "u16":
+        case "i16":
+            return 2;
+        case "u32":
+        case "i32":
+        case "f32":
+            return 4;
+        case "u64":
+        case "i64":
+        case "f64":
+            return 8;
+        default:
+            return 4;
     }
 }
 
 // 无 DWARF 时依符号大小猜测默认类型，用户可在 UI 覆盖
 function defaultType(size) {
-    if (size === 1) return 'u8';
-    if (size === 2) return 'u16';
-    if (size === 8) return 'u64';
-    return 'u32';
+    if (size === 1) return "u8";
+    if (size === 2) return "u16";
+    if (size === 8) return "u64";
+    return "u32";
 }
 
 function resolveVariableRequests(symbols, requests) {
     const list = Array.isArray(symbols) ? symbols : [];
-    const exact = new Map(list.map(symbol => [symbol.name, symbol]));
+    const exact = new Map(list.map((symbol) => [symbol.name, symbol]));
     const folded = new Map();
     for (const symbol of list) {
-        const key = String(symbol.name || '').toLowerCase();
+        const key = String(symbol.name || "").toLowerCase();
         if (!folded.has(key)) folded.set(key, []);
         folded.get(key).push(symbol);
     }
     const seen = new Set();
-    return (Array.isArray(requests) ? requests : []).map(request => {
-        const requestedName = String(request?.name || '').trim();
-        if (!requestedName) throw Object.assign(new Error('Variable name is required'), { code: 'INVALID_VARIABLE_NAME' });
+    return (Array.isArray(requests) ? requests : []).map((request) => {
+        const requestedName = String(request?.name || "").trim();
+        if (!requestedName)
+            throw Object.assign(new Error("Variable name is required"), { code: "INVALID_VARIABLE_NAME" });
         let symbol = exact.get(requestedName);
         if (!symbol) {
             const matches = folded.get(requestedName.toLowerCase()) || [];
             if (matches.length === 1) symbol = matches[0];
-            else if (matches.length > 1) throw Object.assign(new Error(`Variable name is ambiguous: ${requestedName}`), { code: 'AMBIGUOUS_VARIABLE' });
+            else if (matches.length > 1)
+                throw Object.assign(new Error(`Variable name is ambiguous: ${requestedName}`), {
+                    code: "AMBIGUOUS_VARIABLE"
+                });
         }
-        if (!symbol) throw Object.assign(new Error(`Variable not found in current ELF: ${requestedName}`), { code: 'VARIABLE_NOT_FOUND' });
-        if (seen.has(symbol.name)) throw Object.assign(new Error(`Variable requested more than once: ${symbol.name}`), { code: 'DUPLICATE_VARIABLE' });
+        if (!symbol)
+            throw Object.assign(new Error(`Variable not found in current ELF: ${requestedName}`), {
+                code: "VARIABLE_NOT_FOUND"
+            });
+        if (seen.has(symbol.name))
+            throw Object.assign(new Error(`Variable requested more than once: ${symbol.name}`), {
+                code: "DUPLICATE_VARIABLE"
+            });
         seen.add(symbol.name);
         const type = request.type || symbol.watchType || defaultType(symbol.size);
-        if (!SUPPORTED_TYPES.includes(type)) throw Object.assign(new Error(`Unsupported type for ${symbol.name}: ${type}`), { code: 'UNSUPPORTED_VARIABLE_TYPE' });
+        if (!SUPPORTED_TYPES.includes(type))
+            throw Object.assign(new Error(`Unsupported type for ${symbol.name}: ${type}`), {
+                code: "UNSUPPORTED_VARIABLE_TYPE"
+            });
         const width = typeByteLength(type);
-        if (symbol.isComposite || width > Number(symbol.size)) throw Object.assign(new Error(`Variable is not a supported scalar: ${symbol.name}`), { code: 'UNSUPPORTED_VARIABLE' });
+        if (symbol.isComposite || width > Number(symbol.size))
+            throw Object.assign(new Error(`Variable is not a supported scalar: ${symbol.name}`), {
+                code: "UNSUPPORTED_VARIABLE"
+            });
         return {
             requestedName,
             name: symbol.name,
@@ -64,57 +91,89 @@ function resolveVariableRequests(symbols, requests) {
 
 // 将数值按类型编码为小端字节数组（与 decodeValue 对称），越界/非法值抛错
 function encodeValue(value, type) {
-    if (!SUPPORTED_TYPES.includes(type)) throw Object.assign(new Error(`Unsupported type: ${type}`), { code: 'UNSUPPORTED_VARIABLE_TYPE' });
-    const invalid = message => { throw Object.assign(new Error(message), { code: 'INVALID_WRITE_VALUE' }); };
+    if (!SUPPORTED_TYPES.includes(type))
+        throw Object.assign(new Error(`Unsupported type: ${type}`), { code: "UNSUPPORTED_VARIABLE_TYPE" });
+    const invalid = (message) => {
+        throw Object.assign(new Error(message), { code: "INVALID_WRITE_VALUE" });
+    };
     const width = typeByteLength(type);
     const view = new DataView(new ArrayBuffer(width));
-    if (type === 'u64' || type === 'i64') {
+    if (type === "u64" || type === "i64") {
         let integer;
-        if (typeof value === 'bigint') integer = value;
-        else if (typeof value === 'number') {
-            if (!Number.isSafeInteger(value)) invalid(`${type} requires a safe integer Number or an exact decimal string: ${value}`);
+        if (typeof value === "bigint") integer = value;
+        else if (typeof value === "number") {
+            if (!Number.isSafeInteger(value))
+                invalid(`${type} requires a safe integer Number or an exact decimal string: ${value}`);
             integer = BigInt(value);
-        } else if (typeof value === 'string' && /^[+-]?\d+$/.test(value.trim())) {
-            try { integer = BigInt(value.trim()); } catch { invalid(`Invalid decimal integer for ${type}: ${value}`); }
+        } else if (typeof value === "string" && /^[+-]?\d+$/.test(value.trim())) {
+            try {
+                integer = BigInt(value.trim());
+            } catch {
+                invalid(`Invalid decimal integer for ${type}: ${value}`);
+            }
         } else invalid(`${type} requires an integer value: ${value}`);
-        const min = type === 'u64' ? 0n : -(1n << 63n);
-        const max = type === 'u64' ? (1n << 64n) - 1n : (1n << 63n) - 1n;
+        const min = type === "u64" ? 0n : -(1n << 63n);
+        const max = type === "u64" ? (1n << 64n) - 1n : (1n << 63n) - 1n;
         if (integer < min || integer > max) invalid(`Value out of range for ${type}: ${value}`);
-        if (type === 'u64') view.setBigUint64(0, integer, true);
+        if (type === "u64") view.setBigUint64(0, integer, true);
         else view.setBigInt64(0, integer, true);
         return Array.from(new Uint8Array(view.buffer));
     }
     let number;
-    if (type === 'f64' && typeof value === 'string') {
+    if (type === "f64" && typeof value === "string") {
         const alias = value.trim().toLowerCase();
-        if (alias === 'nan') number = NaN;
-        else if (alias === 'inf' || alias === '+inf') number = Infinity;
-        else if (alias === '-inf') number = -Infinity;
+        if (alias === "nan") number = NaN;
+        else if (alias === "inf" || alias === "+inf") number = Infinity;
+        else if (alias === "-inf") number = -Infinity;
         else number = Number(value);
     } else number = Number(value);
-    if (type !== 'f64' && !Number.isFinite(number)) invalid(`Value is not a finite number: ${value}`);
-    if (type === 'f64' && typeof value === 'string' && !value.trim()) invalid(`Value is not a number: ${value}`);
-    if (type === 'f64' && Number.isNaN(number) && !(typeof value === 'number' && Number.isNaN(value))
-        && !(typeof value === 'string' && value.trim().toLowerCase() === 'nan')) invalid(`Value is not a number: ${value}`);
+    if (type !== "f64" && !Number.isFinite(number)) invalid(`Value is not a finite number: ${value}`);
+    if (type === "f64" && typeof value === "string" && !value.trim()) invalid(`Value is not a number: ${value}`);
+    if (
+        type === "f64" &&
+        Number.isNaN(number) &&
+        !(typeof value === "number" && Number.isNaN(value)) &&
+        !(typeof value === "string" && value.trim().toLowerCase() === "nan")
+    )
+        invalid(`Value is not a number: ${value}`);
     const ranges = {
-        u8: [0, 0xff], i8: [-128, 127],
-        u16: [0, 0xffff], i16: [-32768, 32767],
-        u32: [0, 0xffffffff], i32: [-2147483648, 2147483647]
+        u8: [0, 0xff],
+        i8: [-128, 127],
+        u16: [0, 0xffff],
+        i16: [-32768, 32767],
+        u32: [0, 0xffffffff],
+        i32: [-2147483648, 2147483647]
     };
-    if (type !== 'f32' && type !== 'f64') {
+    if (type !== "f32" && type !== "f64") {
         if (!Number.isInteger(number)) invalid(`${type} requires an integer value: ${value}`);
         const [min, max] = ranges[type];
         if (number < min || number > max) invalid(`Value out of range for ${type}: ${value}`);
     }
     switch (type) {
-        case 'u8': view.setUint8(0, number); break;
-        case 'i8': view.setInt8(0, number); break;
-        case 'u16': view.setUint16(0, number, true); break;
-        case 'i16': view.setInt16(0, number, true); break;
-        case 'u32': view.setUint32(0, number, true); break;
-        case 'i32': view.setInt32(0, number, true); break;
-        case 'f32': view.setFloat32(0, number, true); break;
-        case 'f64': view.setFloat64(0, number, true); break;
+        case "u8":
+            view.setUint8(0, number);
+            break;
+        case "i8":
+            view.setInt8(0, number);
+            break;
+        case "u16":
+            view.setUint16(0, number, true);
+            break;
+        case "i16":
+            view.setInt16(0, number, true);
+            break;
+        case "u32":
+            view.setUint32(0, number, true);
+            break;
+        case "i32":
+            view.setInt32(0, number, true);
+            break;
+        case "f32":
+            view.setFloat32(0, number, true);
+            break;
+        case "f64":
+            view.setFloat64(0, number, true);
+            break;
     }
     return Array.from(new Uint8Array(view.buffer));
 }
@@ -122,17 +181,28 @@ function encodeValue(value, type) {
 // 从 src 的 offset 起按小端读取一个标量（decodeValue 与 decodeComposite 共用的唯一实现）
 function decodeScalarAt(view, offset, type) {
     switch (type) {
-        case 'u8': return view.getUint8(offset);
-        case 'i8': return view.getInt8(offset);
-        case 'u16': return view.getUint16(offset, true);
-        case 'i16': return view.getInt16(offset, true);
-        case 'u32': return view.getUint32(offset, true);
-        case 'i32': return view.getInt32(offset, true);
-        case 'f32': return view.getFloat32(offset, true);
-        case 'u64': return Number(view.getBigUint64(offset, true));
-        case 'i64': return Number(view.getBigInt64(offset, true));
-        case 'f64': return view.getFloat64(offset, true);
-        default: return null;
+        case "u8":
+            return view.getUint8(offset);
+        case "i8":
+            return view.getInt8(offset);
+        case "u16":
+            return view.getUint16(offset, true);
+        case "i16":
+            return view.getInt16(offset, true);
+        case "u32":
+            return view.getUint32(offset, true);
+        case "i32":
+            return view.getInt32(offset, true);
+        case "f32":
+            return view.getFloat32(offset, true);
+        case "u64":
+            return Number(view.getBigUint64(offset, true));
+        case "i64":
+            return Number(view.getBigInt64(offset, true));
+        case "f64":
+            return view.getFloat64(offset, true);
+        default:
+            return null;
     }
 }
 
@@ -149,13 +219,13 @@ function decodeValueText(bytes, type) {
     const need = typeByteLength(type);
     if (!bytes || bytes.length < need) return null;
     const view = new DataView(Uint8Array.from(bytes).buffer);
-    if (type === 'u64') return view.getBigUint64(0, true).toString(10);
-    if (type === 'i64') return view.getBigInt64(0, true).toString(10);
-    if (type === 'f64') {
+    if (type === "u64") return view.getBigUint64(0, true).toString(10);
+    if (type === "i64") return view.getBigInt64(0, true).toString(10);
+    if (type === "f64") {
         const value = view.getFloat64(0, true);
-        if (Number.isNaN(value)) return 'NaN';
-        if (value === Infinity) return 'Infinity';
-        if (value === -Infinity) return '-Infinity';
+        if (Number.isNaN(value)) return "NaN";
+        if (value === Infinity) return "Infinity";
+        if (value === -Infinity) return "-Infinity";
     }
     return null;
 }
@@ -170,24 +240,23 @@ function parseElfSymbols(buffer) {
     const sections = elfFormat.readSectionEntries(buf, header);
     const SHT_SYMTAB = 2;
     const SHT_DYNSYM = 11;
-    let symtab = sections.find(s => s.type === SHT_SYMTAB) || sections.find(s => s.type === SHT_DYNSYM);
-    if (!symtab) throw new Error('未找到符号表（.symtab）：请使用 Debug 构建且不要 strip');
+    let symtab = sections.find((s) => s.type === SHT_SYMTAB) || sections.find((s) => s.type === SHT_DYNSYM);
+    if (!symtab) throw new Error("未找到符号表（.symtab）：请使用 Debug 构建且不要 strip");
     const strtab = sections[symtab.link];
-    if (!strtab) throw new Error('符号字符串表（.strtab）缺失');
-    const sectionInBounds = section =>
-        section.offset <= buf.length && section.size <= buf.length - section.offset;
+    if (!strtab) throw new Error("符号字符串表（.strtab）缺失");
+    const sectionInBounds = (section) => section.offset <= buf.length && section.size <= buf.length - section.offset;
     if (!sectionInBounds(symtab) || !sectionInBounds(strtab)) {
-        throw new Error('ELF 符号表或字符串表越界');
+        throw new Error("ELF 符号表或字符串表越界");
     }
 
     const readCStr = (base, rel) => {
         const p = base + rel;
         const limit = base + strtab.size;
-        if (rel < 0 || p < base || p >= limit) return '';
+        if (rel < 0 || p < base || p >= limit) return "";
         let end = p;
         while (end < limit && buf[end] !== 0) end++;
-        if (end === limit) return '';
-        return buf.toString('utf8', p, end);
+        if (end === limit) return "";
+        return buf.toString("utf8", p, end);
     };
 
     const STT_OBJECT = 1;
@@ -195,7 +264,7 @@ function parseElfSymbols(buffer) {
     const SHN_UNDEF = 0;
     const SHN_ABS = 0xfff1;
     const entsize = symtab.entsize || 16;
-    if (entsize < 16) throw new Error('ELF 符号表条目大小无效');
+    if (entsize < 16) throw new Error("ELF 符号表条目大小无效");
     const count = Math.floor(symtab.size / entsize);
     const seen = new Map();
     const seenFuncs = new Map();
@@ -225,10 +294,10 @@ function parseElfSymbols(buffer) {
         seen.set(name, { name, address: stValue >>> 0, size: stSize >>> 0 });
     }
     const symbols = Array.from(seen.values())
-        .filter(s => s.address !== 0)
+        .filter((s) => s.address !== 0)
         .sort((a, b) => a.name.localeCompare(b.name));
     const functions = Array.from(seenFuncs.values())
-        .filter(s => s.address !== 0)
+        .filter((s) => s.address !== 0)
         .sort((a, b) => a.address - b.address);
     return { symbols, functions, warnings };
 }
@@ -292,7 +361,7 @@ function nearestFunction(functions, address) {
 // buf[*] → { base:'buf', segments:[{kind:'all'}] }
 // buf[0].x → { base:'buf', segments:[{kind:'index',index:0},{kind:'member',name:'x'}] }
 function parseMemberPath(pathStr) {
-    const str = String(pathStr || '').trim();
+    const str = String(pathStr || "").trim();
     if (!str) return null;
     // 匹配 baseName 后跟 .member 或 [index/range/*]
     const m = str.match(/^([a-zA-Z_]\w*)/);
@@ -302,31 +371,31 @@ function parseMemberPath(pathStr) {
     const segments = [];
     let pos = 0;
     while (pos < rest.length) {
-        if (rest[pos] === '.') {
+        if (rest[pos] === ".") {
             pos++;
             const nameMatch = rest.slice(pos).match(/^([a-zA-Z_]\w*)/);
             if (!nameMatch) return null;
-            segments.push({ kind: 'member', name: nameMatch[1] });
+            segments.push({ kind: "member", name: nameMatch[1] });
             pos += nameMatch[1].length;
-        } else if (rest[pos] === '[') {
+        } else if (rest[pos] === "[") {
             pos++;
-            const end = rest.indexOf(']', pos);
+            const end = rest.indexOf("]", pos);
             if (end < 0) return null;
             const inner = rest.slice(pos, end).trim();
-            if (inner === '*') {
-                segments.push({ kind: 'all' });
-            } else if (inner.includes(':')) {
-                const parts = inner.split(':');
+            if (inner === "*") {
+                segments.push({ kind: "all" });
+            } else if (inner.includes(":")) {
+                const parts = inner.split(":");
                 if (parts.length !== 2 || !/^\d*$/.test(parts[0]) || !/^\d+$/.test(parts[1])) return null;
-                const start = parts[0] === '' ? 0 : Number(parts[0]);
+                const start = parts[0] === "" ? 0 : Number(parts[0]);
                 const endIdx = Number(parts[1]);
                 if (!Number.isSafeInteger(start) || !Number.isSafeInteger(endIdx) || endIdx <= start) return null;
-                segments.push({ kind: 'range', start, end: endIdx });
+                segments.push({ kind: "range", start, end: endIdx });
             } else {
                 if (!/^\d+$/.test(inner)) return null;
                 const idx = Number(inner);
                 if (!Number.isSafeInteger(idx)) return null;
-                segments.push({ kind: 'index', index: idx });
+                segments.push({ kind: "index", index: idx });
             }
             pos = end + 1;
         } else {
@@ -346,14 +415,14 @@ function expandCompositeLeaves(symbol, layout, pathSpec) {
     const baseAddr = Number(symbol.address) >>> 0;
     const leaves = [];
 
-    function walk(currentLayout, currentOffset, currentPath, depth) {
+    function walk(currentLayout, currentOffset, currentPath, depth, pendingPathSpec = null) {
         if (depth > 10 || !currentLayout) return;
-        if (currentLayout.kind === 'struct' || currentLayout.kind === 'union') {
-            for (const m of (currentLayout.members || [])) {
-                const memberPath = currentPath + '.' + (m.name || '?');
+        if (currentLayout.kind === "struct" || currentLayout.kind === "union") {
+            for (const m of currentLayout.members || []) {
+                const memberPath = currentPath + "." + (m.name || "?");
                 const memberOffset = currentOffset + (m.offset || 0);
                 if (m.compositeLayout) {
-                    walk(m.compositeLayout, memberOffset, memberPath, depth + 1);
+                    walk(m.compositeLayout, memberOffset, memberPath, depth + 1, null);
                 } else if (m.watchType) {
                     leaves.push({
                         name: symbol.name,
@@ -361,50 +430,58 @@ function expandCompositeLeaves(symbol, layout, pathSpec) {
                         address: (baseAddr + memberOffset) >>> 0,
                         size: m.byteSize || typeByteLength(m.watchType),
                         type: m.watchType,
-                        typeName: m.typeName || ''
+                        typeName: m.typeName || "",
+                        ...(Number.isInteger(m.bitSize) ? { bitSize: m.bitSize, bitOffset: m.bitOffset } : {})
                     });
                 }
             }
-        } else if (currentLayout.kind === 'array') {
+        } else if (currentLayout.kind === "array") {
             const elemType = currentLayout.elementType || {};
             const dims = currentLayout.dimensions || [];
             const total = currentLayout.totalElements || 0;
             const elemSize = elemType.byteSize || 0;
             // 确定要展开的元素范围
-            let rangeStart = 0, rangeEnd = total;
-            if (pathSpec && pathSpec.segments.length > 0) {
-                const seg = pathSpec.segments[0];
-                const remainingSegments = pathSpec.segments.slice(1);
-                if (seg.kind === 'index') {
+            let rangeStart = 0,
+                rangeEnd = total;
+            if (pendingPathSpec && pendingPathSpec.segments.length > 0) {
+                const seg = pendingPathSpec.segments[0];
+                const remainingSegments = pendingPathSpec.segments.slice(1);
+                if (seg.kind === "index") {
                     if (seg.index < 0 || seg.index >= total) return;
                     rangeStart = seg.index;
                     rangeEnd = seg.index + 1;
-                } else if (seg.kind === 'range') {
+                } else if (seg.kind === "range") {
                     if (seg.start < 0 || seg.end <= seg.start || seg.end > total) return;
                     rangeStart = seg.start;
                     rangeEnd = seg.end;
-                } else if (seg.kind === 'all') {
+                } else if (seg.kind === "all") {
                     // 全部
                 }
                 // 嵌套路径段（如 buf[1:5].x）作用于复合元素时无法在此展开——walk 只消费
                 // 首段，复合成员导航由下方的路径导航层负责。现状为不输出，交由导航层
                 // 用单段路径（buf[1:5]）或成员段先行（buf[0].x）表达。
-                if (remainingSegments.length > 0 && elemType.kind === 'struct') return;
+                if (remainingSegments.length > 0 && elemType.kind === "struct") return;
             }
             // 展开标量元素
             if (elemType.compositeLayout) {
                 for (let i = rangeStart; i < rangeEnd; i++) {
-                    walk(elemType.compositeLayout, currentOffset + i * elemSize, currentPath + '[' + i + ']', depth + 1);
+                    walk(
+                        elemType.compositeLayout,
+                        currentOffset + i * elemSize,
+                        currentPath + "[" + i + "]",
+                        depth + 1,
+                        null
+                    );
                 }
             } else if (elemType.watchType) {
                 for (let i = rangeStart; i < rangeEnd; i++) {
                     leaves.push({
                         name: symbol.name,
-                        path: currentPath + '[' + i + ']',
+                        path: currentPath + "[" + i + "]",
                         address: (baseAddr + currentOffset + i * elemSize) >>> 0,
                         size: elemSize,
                         type: elemType.watchType,
-                        typeName: elemType.typeName || ''
+                        typeName: elemType.typeName || ""
                     });
                 }
             }
@@ -416,62 +493,80 @@ function expandCompositeLeaves(symbol, layout, pathSpec) {
         let currentLayout = layout;
         let currentOffset = 0;
         let currentPath = symbol.name;
-        for (const seg of pathSpec.segments) {
-            if (seg.kind === 'member' && (currentLayout.kind === 'struct' || currentLayout.kind === 'union')) {
-                const member = (currentLayout.members || []).find(m => m.name === seg.name);
+        let pendingPathSpec = null;
+        for (let segmentIndex = 0; segmentIndex < pathSpec.segments.length; segmentIndex++) {
+            const seg = pathSpec.segments[segmentIndex];
+            if (seg.kind === "member" && (currentLayout.kind === "struct" || currentLayout.kind === "union")) {
+                const member = (currentLayout.members || []).find((m) => m.name === seg.name);
                 if (!member) return []; // 成员不存在
                 currentOffset += member.offset || 0;
-                currentPath += '.' + member.name;
+                currentPath += "." + member.name;
                 if (member.compositeLayout) {
                     currentLayout = member.compositeLayout;
                 } else {
                     // 到达标量叶子
-                    return [{
-                        name: symbol.name,
-                        path: currentPath,
-                        address: (baseAddr + currentOffset) >>> 0,
-                        size: member.byteSize || typeByteLength(member.watchType),
-                        type: member.watchType,
-                        typeName: member.typeName || ''
-                    }];
+                    return [
+                        {
+                            name: symbol.name,
+                            path: currentPath,
+                            address: (baseAddr + currentOffset) >>> 0,
+                            size: member.byteSize || typeByteLength(member.watchType),
+                            type: member.watchType,
+                            typeName: member.typeName || "",
+                            ...(Number.isInteger(member.bitSize)
+                                ? { bitSize: member.bitSize, bitOffset: member.bitOffset }
+                                : {})
+                        }
+                    ];
                 }
-            } else if ((seg.kind === 'index' || seg.kind === 'range' || seg.kind === 'all') && currentLayout.kind === 'array') {
+            } else if (
+                (seg.kind === "index" || seg.kind === "range" || seg.kind === "all") &&
+                currentLayout.kind === "array"
+            ) {
                 const elemSize = currentLayout.elementType ? currentLayout.elementType.byteSize : 0;
-                if (seg.kind === 'index') {
+                if (seg.kind === "index") {
                     const total = Number(currentLayout.totalElements) || 0;
                     if (seg.index < 0 || seg.index >= total) return [];
                     currentOffset += seg.index * elemSize;
-                    currentPath += '[' + seg.index + ']';
+                    currentPath += "[" + seg.index + "]";
                     if (currentLayout.elementType && currentLayout.elementType.compositeLayout) {
                         currentLayout = currentLayout.elementType.compositeLayout;
                         continue;
                     }
-                    if (currentLayout.elementType && currentLayout.elementType.kind !== 'struct' && currentLayout.elementType.kind !== 'union' && currentLayout.elementType.kind !== 'array') {
-                        return [{
-                            name: symbol.name,
-                            path: currentPath,
-                            address: (baseAddr + currentOffset) >>> 0,
-                            size: elemSize,
-                            type: currentLayout.elementType.watchType,
-                            typeName: currentLayout.elementType.typeName || ''
-                        }];
+                    if (
+                        currentLayout.elementType &&
+                        currentLayout.elementType.kind !== "struct" &&
+                        currentLayout.elementType.kind !== "union" &&
+                        currentLayout.elementType.kind !== "array"
+                    ) {
+                        return [
+                            {
+                                name: symbol.name,
+                                path: currentPath,
+                                address: (baseAddr + currentOffset) >>> 0,
+                                size: elemSize,
+                                type: currentLayout.elementType.watchType,
+                                typeName: currentLayout.elementType.typeName || ""
+                            }
+                        ];
                     }
                     return [];
                 }
                 // range / all：展开为多个叶子
-                if (seg.kind === 'range') {
+                if (seg.kind === "range") {
                     const total = Number(currentLayout.totalElements) || 0;
                     if (seg.start < 0 || seg.end <= seg.start || seg.end > total) return [];
                 }
+                pendingPathSpec = { ...pathSpec, segments: pathSpec.segments.slice(segmentIndex) };
                 break; // 跳出循环，交给 walk 处理
             } else {
                 return []; // 路径不匹配
             }
         }
         // 如果导航后到达复合类型，展开其全部叶子
-        walk(currentLayout, currentOffset, currentPath, 0);
+        walk(currentLayout, currentOffset, currentPath, 0, pendingPathSpec);
     } else {
-        walk(layout, 0, symbol.name, 0);
+        walk(layout, 0, symbol.name, 0, null);
     }
     return leaves;
 }
@@ -491,24 +586,45 @@ function decodeComposite(bytes, layout) {
         return decodeScalarAt(view, offset, type);
     };
 
+    const decodeBitfield = (offset, member) => {
+        const width = member.byteSize || typeByteLength(member.watchType);
+        if (offset < 0 || offset + width > src.length) return { value: null, valueText: null };
+        return decodeBitfieldValue(
+            src.subarray(offset, offset + width),
+            member.watchType,
+            member.bitOffset,
+            member.bitSize
+        );
+    };
+
     // offset 为该节点相对变量基址的绝对字节偏移，供 UI/Agent 计算成员地址与定位路径。
     function decodeLayout(offset, lyt) {
         if (!lyt) return null;
-        if (lyt.kind === 'struct' || lyt.kind === 'union') {
+        if (lyt.kind === "struct" || lyt.kind === "union") {
             const members = [];
-            for (const m of (lyt.members || [])) {
+            for (const m of lyt.members || []) {
                 const mOff = offset + (m.offset || 0);
                 if (m.compositeLayout) {
                     members.push({ name: m.name, ...decodeLayout(mOff, m.compositeLayout) });
                 } else if (m.watchType) {
                     const width = typeByteLength(m.watchType);
                     const raw = mOff >= 0 && mOff + width <= src.length ? src.subarray(mOff, mOff + width) : null;
-                    members.push({ name: m.name, offset: mOff, value: decodeScalar(mOff, m.watchType), valueText: decodeValueText(raw, m.watchType), type: m.watchType, typeName: m.typeName || '' });
+                    const decoded = Number.isInteger(m.bitSize)
+                        ? decodeBitfield(mOff, m)
+                        : { value: decodeScalar(mOff, m.watchType), valueText: decodeValueText(raw, m.watchType) };
+                    members.push({
+                        name: m.name,
+                        offset: mOff,
+                        ...decoded,
+                        type: m.watchType,
+                        typeName: m.typeName || "",
+                        ...(Number.isInteger(m.bitSize) ? { bitSize: m.bitSize, bitOffset: m.bitOffset } : {})
+                    });
                 }
             }
             return { kind: lyt.kind, typeName: lyt.typeName, byteSize: lyt.byteSize, offset, members };
         }
-        if (lyt.kind === 'array') {
+        if (lyt.kind === "array") {
             const elemType = lyt.elementType || {};
             const elemSize = elemType.byteSize || 0;
             const total = lyt.totalElements || 0;
@@ -521,15 +637,47 @@ function decodeComposite(bytes, layout) {
                 } else if (elemType.watchType) {
                     const width = typeByteLength(elemType.watchType);
                     const raw = eOff >= 0 && eOff + width <= src.length ? src.subarray(eOff, eOff + width) : null;
-                    elements.push({ index: i, offset: eOff, value: decodeScalar(eOff, elemType.watchType), valueText: decodeValueText(raw, elemType.watchType), type: elemType.watchType });
+                    elements.push({
+                        index: i,
+                        offset: eOff,
+                        value: decodeScalar(eOff, elemType.watchType),
+                        valueText: decodeValueText(raw, elemType.watchType),
+                        type: elemType.watchType
+                    });
                 }
             }
-            return { kind: 'array', typeName: lyt.typeName, byteSize: lyt.byteSize, offset, elementType: elemType, dimensions: lyt.dimensions, elements };
+            return {
+                kind: "array",
+                typeName: lyt.typeName,
+                byteSize: lyt.byteSize,
+                offset,
+                elementType: elemType,
+                dimensions: lyt.dimensions,
+                elements
+            };
         }
         return null;
     }
 
     return decodeLayout(0, layout);
+}
+
+function decodeBitfieldValue(bytes, type, bitOffset, bitSize) {
+    const offset = Number(bitOffset);
+    const size = Number(bitSize);
+    if (!bytes || !Number.isInteger(offset) || !Number.isInteger(size) || offset < 0 || size <= 0) {
+        return { value: null, valueText: null };
+    }
+    const source = Uint8Array.from(bytes);
+    if (offset + size > source.length * 8) return { value: null, valueText: null };
+    let raw = 0n;
+    for (let index = 0; index < source.length; index++) raw |= BigInt(source[index]) << BigInt(index * 8);
+    const mask = (1n << BigInt(size)) - 1n;
+    let value = (raw >> BigInt(offset)) & mask;
+    if (/^i/.test(type) && value & (1n << BigInt(size - 1))) value -= 1n << BigInt(size);
+    const text = value.toString(10);
+    const number = Number(value);
+    return { value: number, valueText: Number.isSafeInteger(number) ? null : text };
 }
 
 // 在已解码的树形值中按路径规格（parseMemberPath 的结果）导航到目标节点。
@@ -541,20 +689,24 @@ function navigateCompositeTree(tree, pathSpec) {
     let node = tree;
     for (const seg of pathSpec.segments) {
         if (!node) return null;
-        if (seg.kind === 'member') {
+        if (seg.kind === "member") {
             if (!Array.isArray(node.members)) return null;
-            node = node.members.find(m => m.name === seg.name) || null;
-        } else if (seg.kind === 'index') {
+            node = node.members.find((m) => m.name === seg.name) || null;
+        } else if (seg.kind === "index") {
             if (!Array.isArray(node.elements)) return null;
-            node = node.elements.find(e => e.index === seg.index) || null;
-        } else if (seg.kind === 'range') {
+            node = node.elements.find((e) => e.index === seg.index) || null;
+        } else if (seg.kind === "range") {
             if (!Array.isArray(node.elements)) return null;
-            const els = node.elements.filter(e => e.index >= seg.start && e.index < seg.end);
+            const els = node.elements.filter((e) => e.index >= seg.start && e.index < seg.end);
             node = {
-                kind: 'array', typeName: node.typeName, elementType: node.elementType,
-                dimensions: node.dimensions, offset: els.length ? els[0].offset : node.offset, elements: els
+                kind: "array",
+                typeName: node.typeName,
+                elementType: node.elementType,
+                dimensions: node.dimensions,
+                offset: els.length ? els[0].offset : node.offset,
+                elements: els
             };
-        } else if (seg.kind === 'all') {
+        } else if (seg.kind === "all") {
             // 停留在当前数组节点
         } else {
             return null;
@@ -565,9 +717,29 @@ function navigateCompositeTree(tree, pathSpec) {
 
 // 判断一个树节点是否为标量叶子（含 value/type，无 members/elements 子结构）。
 function isScalarLeafNode(node) {
-    return !!node && Object.prototype.hasOwnProperty.call(node, 'value')
-        && !Object.prototype.hasOwnProperty.call(node, 'members')
-        && !Object.prototype.hasOwnProperty.call(node, 'elements');
+    return (
+        !!node &&
+        Object.prototype.hasOwnProperty.call(node, "value") &&
+        !Object.prototype.hasOwnProperty.call(node, "members") &&
+        !Object.prototype.hasOwnProperty.call(node, "elements")
+    );
 }
 
-module.exports = { parseElfSymbols, parseElfSections, nearestFunction, decodeValue, decodeValueText, encodeValue, decodeComposite, navigateCompositeTree, isScalarLeafNode, defaultType, typeByteLength, resolveVariableRequests, parseMemberPath, expandCompositeLeaves, SUPPORTED_TYPES };
+module.exports = {
+    parseElfSymbols,
+    parseElfSections,
+    nearestFunction,
+    decodeValue,
+    decodeValueText,
+    decodeBitfieldValue,
+    encodeValue,
+    decodeComposite,
+    navigateCompositeTree,
+    isScalarLeafNode,
+    defaultType,
+    typeByteLength,
+    resolveVariableRequests,
+    parseMemberPath,
+    expandCompositeLeaves,
+    SUPPORTED_TYPES
+};

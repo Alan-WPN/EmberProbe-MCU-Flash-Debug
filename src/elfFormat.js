@@ -5,12 +5,12 @@
 
 // 校验并读取 ELF32 LE 文件头；非法文件抛出与原实现一致的错误
 function readElf32Header(buf) {
-    if (buf.length < 52) throw new Error('文件过小，不是有效的 ELF');
+    if (buf.length < 52) throw new Error("文件过小，不是有效的 ELF");
     if (!(buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46)) {
-        throw new Error('不是有效的 ELF 文件（魔数不匹配）');
+        throw new Error("不是有效的 ELF 文件（魔数不匹配）");
     }
-    if (buf[4] !== 1) throw new Error('仅支持 32 位 ELF（Cortex-M）');
-    if (buf[5] !== 1) throw new Error('仅支持小端 ELF（Cortex-M）');
+    if (buf[4] !== 1) throw new Error("仅支持 32 位 ELF（Cortex-M）");
+    if (buf[5] !== 1) throw new Error("仅支持小端 ELF（Cortex-M）");
     return {
         machine: buf.readUInt16LE(18),
         phoff: buf.readUInt32LE(28),
@@ -26,9 +26,9 @@ function readElf32Header(buf) {
 // 读取全部节头条目（不含节名；节名依赖 shstrtab，按需经 readSectionNames 解析）
 function readSectionEntries(buf, header) {
     const { shoff, shentsize, shnum } = header;
-    if (!shoff || !shnum) throw new Error('缺少节头表，可能已被 strip（请用 Debug 构建）');
+    if (!shoff || !shnum) throw new Error("缺少节头表，可能已被 strip（请用 Debug 构建）");
     if (shentsize < 40 || shoff + shnum * shentsize > buf.length) {
-        throw new Error('ELF 节头表越界或条目大小无效');
+        throw new Error("ELF 节头表越界或条目大小无效");
     }
     const entries = [];
     for (let i = 0; i < shnum; i++) {
@@ -52,15 +52,15 @@ function readSectionEntries(buf, header) {
 function readSectionNames(buf, entries, shstrndx) {
     const shstr = entries[shstrndx];
     const readName = (rel) => {
-        if (!shstr || rel < 0) return '';
+        if (!shstr || rel < 0) return "";
         const p = shstr.offset + rel;
         const limit = shstr.offset + shstr.size;
-        if (p >= limit || limit > buf.length) return '';
+        if (p >= limit || limit > buf.length) return "";
         let end = p;
         while (end < limit && buf[end] !== 0) end++;
-        return buf.toString('utf8', p, end);
+        return buf.toString("utf8", p, end);
     };
-    return entries.map(entry => readName(entry.nameOffset));
+    return entries.map((entry) => readName(entry.nameOffset));
 }
 
 // 对外使用格式层通用名；32 位限制由实现内的 class 校验保证。

@@ -6,7 +6,13 @@ const os = require("os");
 const path = require("path");
 const elfSymbols = require("../src/elfSymbols");
 const { LiveWatchService } = require("../src/services/liveWatchService");
-const { SamplingArchive, csvField, sampleValueText } = require("../src/services/samplingArchive");
+const {
+    SamplingArchive,
+    csvField,
+    csvHeaderField,
+    sampleValueText,
+    cleanupStaleSamplingArchives
+} = require("../src/services/samplingArchive");
 
 async function main() {
     const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-sampling-archive-"));
@@ -21,13 +27,25 @@ async function main() {
     });
 
     try {
-        assert.strictEqual(csvField('a,b'), '"a,b"');
+        assert.strictEqual(csvField("a,b"), '"a,b"');
         assert.strictEqual(csvField('a"b'), '"a""b"');
         assert.strictEqual(csvField(null), "");
+        assert.strictEqual(
+            csvHeaderField('=HYPERLINK("https://example.invalid")'),
+            '"\'=HYPERLINK(""https://example.invalid"")"'
+        );
         assert.strictEqual(sampleValueText({ value: 1.25, valueText: null }), "1.25");
         assert.strictEqual(sampleValueText({ value: -0, valueText: null }), "-0");
         assert.strictEqual(sampleValueText({ value: 1, valueText: "exact" }), "exact");
         assert.strictEqual(sampleValueText({ value: null, valueText: null }), null);
+
+        const stale = path.join(temporaryRoot, "sampling-history-999999-deadbeef");
+        const active = path.join(temporaryRoot, `sampling-history-${process.pid}-abcdef`);
+        fs.mkdirSync(stale);
+        fs.mkdirSync(active);
+        assert.strictEqual(cleanupStaleSamplingArchives(temporaryRoot), 1);
+        assert.ok(!fs.existsSync(stale), "archives left by dead extension hosts should be removed");
+        assert.ok(fs.existsSync(active), "the current extension host archive must be preserved");
 
         // Sampling starts recording automatically; timestamp gaps model stop/disconnect/reconnect without sessions.
         assert.strictEqual(
@@ -55,10 +73,7 @@ async function main() {
             fromMs: 1000,
             toMs: 3000
         });
-        assert.deepStrictEqual(
-            { rows: first.rows, seriesCount: first.seriesCount },
-            { rows: 1, seriesCount: 2 }
-        );
+        assert.deepStrictEqual({ rows: first.rows, seriesCount: first.seriesCount }, { rows: 1, seriesCount: 2 });
         assert.strictEqual(
             fs.readFileSync(firstCsv, "utf8"),
             '\uFEFFtime,"sensor,x",Tick\r\n1970-01-01T00:00:01.000Z,2.5,1\r\n'
@@ -99,11 +114,11 @@ async function main() {
             path.join(__dirname, "..", "src", "webview", "liveWatch", "renderer.js"),
             "utf8"
         );
-        assert.match(rendererSource, /post\(\{type:'samplingArchiveInfo'\}\)/);
+        assert.match(rendererSource, /post\(\{\s*type:\s*["']samplingArchiveInfo["']\s*\}\)/);
         assert.match(rendererSource, /firstTimestampMs/);
         assert.match(rendererSource, /lastTimestampMs/);
-        assert.match(rendererSource, /chartState\.bounds\.min-origin/);
-        assert.match(rendererSource, /chartState\.bounds\.max-origin/);
+        assert.match(rendererSource, /chartState\.bounds\.min\s*-\s*origin/);
+        assert.match(rendererSource, /chartState\.bounds\.max\s*-\s*origin/);
     } finally {
         await archive.dispose();
         assert.strictEqual(fs.existsSync(archiveRoot), false, "temporary history must be deleted on exit");
@@ -160,10 +175,20 @@ async function main() {
 
         const typeCsv = path.join(typeRoot, "types.csv");
         await typeArchive.exportCsv({ outputPath: typeCsv });
-        const lines = fs.readFileSync(typeCsv, "utf8").replace(/^\uFEFF/, "").trim().split(/\r?\n/);
+        const lines = fs
+            .readFileSync(typeCsv, "utf8")
+            .replace(/^\uFEFF/, "")
+            .trim()
+            .split(/\r?\n/);
         assert.deepStrictEqual(lines[0].split(","), ["time", ...fixtures.map(([name]) => name), "missing"]);
         assert.deepStrictEqual(lines[1].split(",").slice(1), [...fixtures.map(([, , expected]) => expected), ""]);
-        assert.deepStrictEqual(elfSymbols.SUPPORTED_TYPES.slice().sort(), fixtures.slice(0, 10).map(([name]) => name).sort());
+        assert.deepStrictEqual(
+            elfSymbols.SUPPORTED_TYPES.slice().sort(),
+            fixtures
+                .slice(0, 10)
+                .map(([name]) => name)
+                .sort()
+        );
     } finally {
         await typeArchive.dispose();
         fs.rmSync(typeRoot, { recursive: true, force: true });

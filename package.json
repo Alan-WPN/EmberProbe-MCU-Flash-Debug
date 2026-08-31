@@ -33,6 +33,12 @@
   ],
   "icon": "media/icon.png",
   "main": "./dist/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "EmberProbe executes the configured OpenOCD tool and hardware scripts, so the workspace must be trusted."
+    }
+  },
   "activationEvents": [
     "onStartupFinished",
     "workspaceContains:.agents/skills/mcu-live-watch/SKILL.md",
@@ -165,9 +171,9 @@
     "test": "npm run check",
     "check": "node scripts/run-tests.js",
     "check:release": "node scripts/run-tests.js --release",
-    "lint": "eslint src scripts test",
-    "format": "prettier --write \"src/services/**/*.js\" \"src/peripheralWriteAuthorization.js\" \"src/probeCoordinator.js\" \"src/webviewAssets.js\" \"scripts/**/*.js\" \"test/services.test.js\" \"test/probe-coordinator.test.js\" \"test/release-script.test.js\" \"test/webview-assets.test.js\" \"test/svd-peripheral.test.js\" \"test/debug-control.test.js\" \"test/new-skills.test.js\" \"test/hil/**/*.js\" \".github/workflows/*.yml\" \"*.json\"",
-    "format:check": "prettier --check \"src/services/**/*.js\" \"src/peripheralWriteAuthorization.js\" \"src/probeCoordinator.js\" \"src/webviewAssets.js\" \"scripts/**/*.js\" \"test/services.test.js\" \"test/probe-coordinator.test.js\" \"test/release-script.test.js\" \"test/webview-assets.test.js\" \"test/svd-peripheral.test.js\" \"test/debug-control.test.js\" \"test/new-skills.test.js\" \"test/hil/**/*.js\" \".github/workflows/*.yml\" \"*.json\"",
+    "lint": "eslint src skills scripts test",
+    "format": "prettier --write \"src/**/*.js\" \"skills/**/*.js\" \"scripts/**/*.js\" \"test/**/*.js\" \".github/workflows/*.yml\" \"*.json\"",
+    "format:check": "prettier --check \"src/**/*.js\" \"skills/**/*.js\" \"scripts/**/*.js\" \"test/**/*.js\" \".github/workflows/*.yml\" \"*.json\"",
     "typecheck": "tsc -p jsconfig.quality.json",
     "coverage": "c8 node scripts/run-tests.js --quality",
     "quality": "npm run lint && npm run format:check && npm run typecheck && npm run coverage",
@@ -180,11 +186,13 @@
   },
   "dependencies": {
     "fast-xml-parser": "^5.11.0",
-    "tar": "^7.5.20",
+    "fzstd": "^0.1.1",
+    "tar": "^7.5.22",
     "yauzl": "^3.4.0"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
+    "@types/vscode": "^1.85.0",
     "@vscode/test-electron": "^3.1.0",
     "c8": "^12.0.0",
     "esbuild": "^0.28.1",

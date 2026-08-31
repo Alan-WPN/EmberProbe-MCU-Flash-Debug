@@ -12,61 +12,74 @@ function parseArgs(argv) {
     const out = { cus: 300, vars: 400, structs: 4, members: 8 };
     for (let i = 2; i < argv.length; i++) {
         const m = argv[i].match(/^--(cus|vars|structs|members)$/);
-        if (m && argv[i + 1]) { out[m[1]] = Math.max(1, Number(argv[++i]) || out[m[1]]); }
+        if (m && argv[i + 1]) {
+            out[m[1]] = Math.max(1, Number(argv[++i]) || out[m[1]]);
+        }
     }
     return out;
 }
 
-function u32(v) { return [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff]; }
-function strBytes(s) { const b = Array.from(Buffer.from(s, "latin1")); b.push(0); return b; }
+function u32(v) {
+    return [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff];
+}
+function strBytes(s) {
+    const b = Array.from(Buffer.from(s, "latin1"));
+    b.push(0);
+    return b;
+}
 
 // DWARF v4 缩写表（与 test/dwarf-composite.test.js 同构）：
 // 1=compile_unit(有子) 2=base_type(name,encoding,byte_size) 3=structure_type(name,byte_size,有子)
 // 4=member(name,type ref4,data_member_location data1) 5=variable(name,type ref4,location exprloc)
 // 6=array_type(type ref4,byte_size,有子) 7=subrange(upper_bound data1)
 const ABBREV = Buffer.from([
-    1, 0x11, 1, 0, 0,
-    2, 0x24, 0, 0x03, 0x08, 0x3e, 0x0b, 0x0b, 0x0b, 0, 0,
-    3, 0x13, 1, 0x03, 0x08, 0x0b, 0x0b, 0, 0,
-    4, 0x0d, 0, 0x03, 0x08, 0x49, 0x13, 0x38, 0x0b, 0, 0,
-    5, 0x34, 0, 0x03, 0x08, 0x49, 0x13, 0x02, 0x18, 0, 0,
-    6, 0x01, 1, 0x49, 0x13, 0x0b, 0x0b, 0, 0,
-    7, 0x21, 0, 0x2f, 0x0b, 0, 0,
-    0
+    1, 0x11, 1, 0, 0, 2, 0x24, 0, 0x03, 0x08, 0x3e, 0x0b, 0x0b, 0x0b, 0, 0, 3, 0x13, 1, 0x03, 0x08, 0x0b, 0x0b, 0, 0, 4,
+    0x0d, 0, 0x03, 0x08, 0x49, 0x13, 0x38, 0x0b, 0, 0, 5, 0x34, 0, 0x03, 0x08, 0x49, 0x13, 0x02, 0x18, 0, 0, 6, 0x01, 1,
+    0x49, 0x13, 0x0b, 0x0b, 0, 0, 7, 0x21, 0, 0x2f, 0x0b, 0, 0, 0
 ]);
 
 // 构建一个 CU 的 .debug_info 负载；ref4 为 CU 相对偏移（DW_FORM_ref4 语义）
 function buildCu(index, cfg) {
     const b = [];
     const off = () => b.length;
-    b.push(...u32(0), 4, 0, ...u32(0), 4);      // unit_length 占位 + version 4 + abbrev_off 0 + addr_size 4
-    b.push(1);                                   // compile_unit
-    b.push(2, ...strBytes("int"), 0x05, 4);      // base_type int
+    b.push(...u32(0), 4, 0, ...u32(0), 4); // unit_length 占位 + version 4 + abbrev_off 0 + addr_size 4
+    b.push(1); // compile_unit
+    b.push(2, ...strBytes("int"), 0x05, 4); // base_type int
     const intOff = 11;
-    b.push(2, ...strBytes("float"), 0x04, 4);    // base_type float
+    b.push(2, ...strBytes("float"), 0x04, 4); // base_type float
     const floatOff = off();
     const structOffs = [];
     for (let s = 0; s < cfg.structs; s++) {
-        b.push(3, ...strBytes(`S${index}_${s}`), cfg.members * 4);   // structure_type
-        structOffs.push(off() - 1);                                  // struct DIE 自身偏移
+        b.push(3, ...strBytes(`S${index}_${s}`), cfg.members * 4); // structure_type
+        structOffs.push(off() - 1); // struct DIE 自身偏移
         for (let m = 0; m < cfg.members; m++) {
-            b.push(4, ...strBytes(`m${m}`), ...u32(intOff), m * 4);  // member → int
+            b.push(4, ...strBytes(`m${m}`), ...u32(intOff), m * 4); // member → int
         }
-        b.push(0);                                                   // end struct children
+        b.push(0); // end struct children
     }
-    b.push(6, ...u32(intOff), 16);               // array_type of int
+    b.push(6, ...u32(intOff), 16); // array_type of int
     const arrOff = off() - 1;
-    b.push(7, 3, 0);                             // subrange upper_bound=3 → 4 元素
+    b.push(7, 3, 0); // subrange upper_bound=3 → 4 元素
     b.push(5, ...strBytes(`cu${index}_f`), ...u32(floatOff), 5, 0x03, ...u32(0x20000000 + index * 4));
     b.push(5, ...strBytes(`cu${index}_a`), ...u32(arrOff), 5, 0x03, ...u32(0x20010000 + index * 4));
     for (let v = 0; v < cfg.vars; v++) {
-        const kind = v % (2 + cfg.structs);      // int、float、各 struct 轮转
-        const typeRef = kind === 0 ? intOff : (kind === 1 ? floatOff : structOffs[kind - 2]);
-        b.push(5, ...strBytes(`v${index}_${v}`), ...u32(typeRef), 5, 0x03, ...u32(0x20000000 + index * 0x10000 + v * 4));
+        const kind = v % (2 + cfg.structs); // int、float、各 struct 轮转
+        const typeRef = kind === 0 ? intOff : kind === 1 ? floatOff : structOffs[kind - 2];
+        b.push(
+            5,
+            ...strBytes(`v${index}_${v}`),
+            ...u32(typeRef),
+            5,
+            0x03,
+            ...u32(0x20000000 + index * 0x10000 + v * 4)
+        );
     }
-    b.push(0);                                   // end CU children
+    b.push(0); // end CU children
     const unitLen = b.length - 4;
-    b[0] = unitLen & 0xff; b[1] = (unitLen >>> 8) & 0xff; b[2] = (unitLen >>> 16) & 0xff; b[3] = (unitLen >>> 24) & 0xff;
+    b[0] = unitLen & 0xff;
+    b[1] = (unitLen >>> 8) & 0xff;
+    b[2] = (unitLen >>> 16) & 0xff;
+    b[3] = (unitLen >>> 24) & 0xff;
     return b;
 }
 
@@ -77,7 +90,11 @@ function buildElf(cfg) {
     const names = ["", ".debug_info", ".debug_abbrev", ".shstrtab"];
     const nameOff = {};
     const shBytes = [];
-    for (const nm of names) { nameOff[nm] = shBytes.length; for (const c of Buffer.from(nm, "latin1")) shBytes.push(c); shBytes.push(0); }
+    for (const nm of names) {
+        nameOff[nm] = shBytes.length;
+        for (const c of Buffer.from(nm, "latin1")) shBytes.push(c);
+        shBytes.push(0);
+    }
     const shstrtab = Buffer.from(shBytes);
     const diOff = 52;
     const abOff = diOff + debugInfo.length;
@@ -85,24 +102,52 @@ function buildElf(cfg) {
     const shoff = (shstrOff + shstrtab.length + 3) & ~3;
     const shnum = 4;
     const buf = Buffer.alloc(shoff + shnum * 40);
-    buf[0] = 0x7f; buf[1] = 0x45; buf[2] = 0x4c; buf[3] = 0x46; buf[4] = 1; buf[5] = 1; buf[6] = 1;
-    buf.writeUInt16LE(2, 16); buf.writeUInt16LE(0x28, 18); buf.writeUInt32LE(1, 20);
-    buf.writeUInt32LE(shoff, 32); buf.writeUInt16LE(52, 40); buf.writeUInt16LE(40, 46);
-    buf.writeUInt16LE(shnum, 48); buf.writeUInt16LE(3, 50);
-    debugInfo.copy(buf, diOff); ABBREV.copy(buf, abOff); shstrtab.copy(buf, shstrOff);
+    buf[0] = 0x7f;
+    buf[1] = 0x45;
+    buf[2] = 0x4c;
+    buf[3] = 0x46;
+    buf[4] = 1;
+    buf[5] = 1;
+    buf[6] = 1;
+    buf.writeUInt16LE(2, 16);
+    buf.writeUInt16LE(0x28, 18);
+    buf.writeUInt32LE(1, 20);
+    buf.writeUInt32LE(shoff, 32);
+    buf.writeUInt16LE(52, 40);
+    buf.writeUInt16LE(40, 46);
+    buf.writeUInt16LE(shnum, 48);
+    buf.writeUInt16LE(3, 50);
+    debugInfo.copy(buf, diOff);
+    ABBREV.copy(buf, abOff);
+    shstrtab.copy(buf, shstrOff);
     const sh = (i) => shoff + i * 40;
-    buf.writeUInt32LE(nameOff[".debug_info"], sh(1) + 0); buf.writeUInt32LE(1, sh(1) + 4); buf.writeUInt32LE(diOff, sh(1) + 16); buf.writeUInt32LE(debugInfo.length, sh(1) + 20);
-    buf.writeUInt32LE(nameOff[".debug_abbrev"], sh(2) + 0); buf.writeUInt32LE(1, sh(2) + 4); buf.writeUInt32LE(abOff, sh(2) + 16); buf.writeUInt32LE(ABBREV.length, sh(2) + 20);
-    buf.writeUInt32LE(nameOff[".shstrtab"], sh(3) + 0); buf.writeUInt32LE(3, sh(3) + 4); buf.writeUInt32LE(shstrOff, sh(3) + 16); buf.writeUInt32LE(shstrtab.length, sh(3) + 20);
+    buf.writeUInt32LE(nameOff[".debug_info"], sh(1) + 0);
+    buf.writeUInt32LE(1, sh(1) + 4);
+    buf.writeUInt32LE(diOff, sh(1) + 16);
+    buf.writeUInt32LE(debugInfo.length, sh(1) + 20);
+    buf.writeUInt32LE(nameOff[".debug_abbrev"], sh(2) + 0);
+    buf.writeUInt32LE(1, sh(2) + 4);
+    buf.writeUInt32LE(abOff, sh(2) + 16);
+    buf.writeUInt32LE(ABBREV.length, sh(2) + 20);
+    buf.writeUInt32LE(nameOff[".shstrtab"], sh(3) + 0);
+    buf.writeUInt32LE(3, sh(3) + 4);
+    buf.writeUInt32LE(shstrOff, sh(3) + 16);
+    buf.writeUInt32LE(shstrtab.length, sh(3) + 20);
     return { buf, debugInfoBytes: debugInfo.length };
 }
 
-function ms(startNs) { return Number(process.hrtime.bigint() - startNs) / 1e6; }
-function fmt(n) { return n.toFixed(1).padStart(8); }
+function ms(startNs) {
+    return Number(process.hrtime.bigint() - startNs) / 1e6;
+}
+function fmt(n) {
+    return n.toFixed(1).padStart(8);
+}
 
 const cfg = parseArgs(process.argv);
 const { buf, debugInfoBytes } = buildElf(cfg);
-console.log(`合成 ELF: .debug_info=${(debugInfoBytes / 1024).toFixed(0)} KiB，CU=${cfg.cus}，每 CU 变量=${cfg.vars + 2}，结构体=${cfg.structs}×${cfg.members} 成员`);
+console.log(
+    `合成 ELF: .debug_info=${(debugInfoBytes / 1024).toFixed(0)} KiB，CU=${cfg.cus}，每 CU 变量=${cfg.vars + 2}，结构体=${cfg.structs}×${cfg.members} 成员`
+);
 
 // 旧路径成本：两个 Buffer 副本各完整解析一次（重构前 parseDwarfVariableTypes/parseCompositeLayout 无共享缓存）
 let t0 = process.hrtime.bigint();
@@ -113,17 +158,21 @@ t0 = process.hrtime.bigint();
 const bufB = Buffer.from(buf);
 const layouts = dwarf.parseCompositeLayout(bufB);
 const tLayouts = ms(t0);
-console.log(`double-parse（旧路径等价成本）: types=${fmt(tTypes)} ms  layouts=${fmt(tLayouts)} ms  合计=${fmt(tTypes + tLayouts)} ms`);
+console.log(
+    `double-parse（旧路径等价成本）: types=${fmt(tTypes)} ms  layouts=${fmt(tLayouts)} ms  合计=${fmt(tTypes + tLayouts)} ms`
+);
 
 if (typeof dwarf.parseDwarf === "function") {
     // 新聚合入口：同一 Buffer 一次解析、两个视图
-    dwarf.parseDwarf(Buffer.from(buf));          // 预热（JIT）
+    dwarf.parseDwarf(Buffer.from(buf)); // 预热（JIT）
     t0 = process.hrtime.bigint();
     const agg = dwarf.parseDwarf(Buffer.from(buf));
     const tAgg = ms(t0);
     console.log(`parseDwarf（聚合入口）        : ${fmt(tAgg)} ms`);
     if (agg.types.size !== types.size || agg.layouts.size !== layouts.size) {
-        console.error(`!! 视图结果数不一致: agg types=${agg.types.size} layouts=${agg.layouts.size} vs legacy ${types.size}/${layouts.size}`);
+        console.error(
+            `!! 视图结果数不一致: agg types=${agg.types.size} layouts=${agg.layouts.size} vs legacy ${types.size}/${layouts.size}`
+        );
         process.exitCode = 1;
     } else {
         console.log(`结果一致性: types=${agg.types.size} 项, layouts=${agg.layouts.size} 项 ✓`);

@@ -85,6 +85,11 @@ try {
         fs.readdirSync(temp).some((file) => file.startsWith("sidebar-")),
         "current sidebar assets must survive pruning"
     );
+    const providerSource = fs.readFileSync(require.resolve("../src/mainViewProvider"), "utf8");
+    assert.ok(
+        providerSource.includes("`live-watch-${panelId}`"),
+        "each Live Watch panel must own an independent asset scope"
+    );
     console.log("Webview asset and CSP tests passed");
 } finally {
     fs.rmSync(temp, { recursive: true, force: true });

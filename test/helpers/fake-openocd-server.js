@@ -24,14 +24,14 @@ class FakeOpenOcdServer {
     }
 
     async start() {
-        this.server = net.createServer(socket => {
+        this.server = net.createServer((socket) => {
             this.sockets.add(socket);
             let pending = "";
             socket.setEncoding("latin1");
             socket.on("close", () => this.sockets.delete(socket));
             // 测试假件必须吞掉传输层错误（如拆连接时的 ECONNRESET），否则未处理 error 事件会崩溃整个测试进程。
             socket.on("error", () => {});
-            socket.on("data", chunk => {
+            socket.on("data", (chunk) => {
                 pending += chunk;
                 let boundary;
                 while ((boundary = pending.indexOf(SUB)) >= 0) {
@@ -84,7 +84,7 @@ class FakeOpenOcdServer {
             const values = [];
             for (let offset = 0; offset < raw.length; offset += elementBytes) {
                 let value = 0;
-                for (let index = 0; index < elementBytes; index++) value += raw[offset + index] * (2 ** (index * 8));
+                for (let index = 0; index < elementBytes; index++) value += raw[offset + index] * 2 ** (index * 8);
                 values.push("0x" + (value >>> 0).toString(16));
             }
             return { ok: true, response: values.join(" ") };
@@ -92,7 +92,11 @@ class FakeOpenOcdServer {
         const write = command.match(/^(?:ocd_)?write_memory\s+(0x[0-9a-f]+)\s+(8|16|32)\s+\{([^}]*)\}$/i);
         if (write) {
             const elementBytes = Number(write[2]) / 8;
-            const elements = write[3].trim().split(/\s+/).filter(Boolean).map(value => Number.parseInt(value, 0) >>> 0);
+            const elements = write[3]
+                .trim()
+                .split(/\s+/)
+                .filter(Boolean)
+                .map((value) => Number.parseInt(value, 0) >>> 0);
             const values = [];
             for (const element of elements) {
                 for (let index = 0; index < elementBytes; index++) values.push((element >>> (index * 8)) & 0xff);
@@ -101,8 +105,14 @@ class FakeOpenOcdServer {
             return { ok: true, response: "" };
         }
         if (command === "[target current] curstate") return { ok: true, response: this.state };
-        if (command === "halt") { this.state = "halted"; return { ok: true, response: "" }; }
-        if (command === "resume") { this.state = "running"; return { ok: true, response: "" }; }
+        if (command === "halt") {
+            this.state = "halted";
+            return { ok: true, response: "" };
+        }
+        if (command === "resume") {
+            this.state = "running";
+            return { ok: true, response: "" };
+        }
         if (command === "shutdown") {
             return { ok: true, response: "" };
         }
@@ -123,7 +133,7 @@ class FakeOpenOcdServer {
         if (!this.server) return;
         const server = this.server;
         this.server = null;
-        await new Promise(resolve => server.close(resolve));
+        await new Promise((resolve) => server.close(resolve));
     }
 }
 

@@ -3,13 +3,13 @@ const assert = require("assert");
 const { readFaultInfo, decodeFaultRegisters, FAULT_REGS, CFSR_BITS, HFSR_BITS } = require("../src/faultInfo");
 
 // —— 寄存器地址表（SCB，ARMv7-M 架构手册）——
-assert.strictEqual(FAULT_REGS.icsr, 0xE000ED04);
-assert.strictEqual(FAULT_REGS.shcsr, 0xE000ED24);
-assert.strictEqual(FAULT_REGS.cfsr, 0xE000ED28);
-assert.strictEqual(FAULT_REGS.hfsr, 0xE000ED2C);
-assert.strictEqual(FAULT_REGS.dfsr, 0xE000ED30);
-assert.strictEqual(FAULT_REGS.mmfar, 0xE000ED34);
-assert.strictEqual(FAULT_REGS.bfar, 0xE000ED38);
+assert.strictEqual(FAULT_REGS.icsr, 0xe000ed04);
+assert.strictEqual(FAULT_REGS.shcsr, 0xe000ed24);
+assert.strictEqual(FAULT_REGS.cfsr, 0xe000ed28);
+assert.strictEqual(FAULT_REGS.hfsr, 0xe000ed2c);
+assert.strictEqual(FAULT_REGS.dfsr, 0xe000ed30);
+assert.strictEqual(FAULT_REGS.mmfar, 0xe000ed34);
+assert.strictEqual(FAULT_REGS.bfar, 0xe000ed38);
 assert.ok(CFSR_BITS.length >= 15 && HFSR_BITS.length === 3);
 
 // —— 场景 1：精确总线错误升级为 HardFault（PRECISERR + BFARVALID + FORCED）——
@@ -21,10 +21,10 @@ const busFault = decodeFaultRegisters({
 });
 assert.strictEqual(busFault.faultDetected, true);
 assert.strictEqual(busFault.bfarValid, true);
-const precise = busFault.faults.find(f => f.flag === "PRECISERR");
+const precise = busFault.faults.find((f) => f.flag === "PRECISERR");
 assert.ok(precise, "PRECISERR must be decoded");
 assert.strictEqual(precise.faultAddress, "0x60000000", "BFAR provides the fault address");
-assert.ok(busFault.faults.some(f => f.flag === "FORCED" && f.register === "HFSR"));
+assert.ok(busFault.faults.some((f) => f.flag === "FORCED" && f.register === "HFSR"));
 assert.strictEqual(busFault.exception.name, "HardFault");
 assert.strictEqual(busFault.exception.number, 3);
 
@@ -37,14 +37,14 @@ const memFault = decodeFaultRegisters({
 });
 assert.strictEqual(memFault.faultDetected, true);
 assert.strictEqual(memFault.mmfarValid, true);
-const daccviol = memFault.faults.find(f => f.flag === "DACCVIOL");
+const daccviol = memFault.faults.find((f) => f.flag === "DACCVIOL");
 assert.strictEqual(daccviol.faultAddress, "0x00000010", "MMFAR provides the fault address");
 assert.strictEqual(memFault.exception.name, "MemManage");
 
 // —— 场景 3：UsageFault 除零与未定义指令（无地址）——
 const usageFault = decodeFaultRegisters({ cfsr: (1 << 25) | (1 << 16), hfsr: 0, icsr: 6 });
-assert.deepStrictEqual(usageFault.faults.map(f => f.flag).sort(), ["DIVBYZERO", "UNDEFINSTR"]);
-assert.ok(usageFault.faults.every(f => f.faultAddress === undefined));
+assert.deepStrictEqual(usageFault.faults.map((f) => f.flag).sort(), ["DIVBYZERO", "UNDEFINSTR"]);
+assert.ok(usageFault.faults.every((f) => f.faultAddress === undefined));
 
 // —— 场景 4：无故障、线程模式正常运行 ——
 const clean = decodeFaultRegisters({ cfsr: 0, hfsr: 0, dfsr: 0, icsr: 0 });
@@ -80,21 +80,29 @@ assert.strictEqual(decodeFaultRegisters({ cfsr: 0, icsr: 15 }).exception.name, "
         fs.writeFileSync(path.join(scripts, "interface", "cmsis-dap.cfg"), "");
         fs.writeFileSync(path.join(scripts, "target", "stm32f4x.cfg"), "");
         const fake = path.join(bin, "fake-openocd.sh");
-        fs.writeFileSync(fake, [
-            "#!/bin/sh",
-            "if printf '%s' \"$*\" | grep -q 'echo \\[reg pc\\]'; then",
-            "  echo \"pc (/32): 0x080034AC\"",
-            "  echo \"sp (/32): 0x2000FF00\"",
-            "  echo \"lr (/32): 0x08003401\"",
-            "  echo \"xPSR (/32): 0x61000000\"",
-            "fi",
-            "echo \"0xE000ED28: 00000082\"",
-            "exit 0",
-            ""
-        ].join("\n"));
+        fs.writeFileSync(
+            fake,
+            [
+                "#!/bin/sh",
+                "if printf '%s' \"$*\" | grep -q 'echo \\[reg pc\\]'; then",
+                '  echo "pc (/32): 0x080034AC"',
+                '  echo "sp (/32): 0x2000FF00"',
+                '  echo "lr (/32): 0x08003401"',
+                '  echo "xPSR (/32): 0x61000000"',
+                "fi",
+                'echo "0xE000ED28: 00000082"',
+                "exit 0",
+                ""
+            ].join("\n")
+        );
         fs.chmodSync(fake, 0o755);
         try {
-            const info = await readFaultInfo({ executable: fake, probe: "cmsis-dap.cfg", target: "stm32f4x.cfg", cwd: dir });
+            const info = await readFaultInfo({
+                executable: fake,
+                probe: "cmsis-dap.cfg",
+                target: "stm32f4x.cfg",
+                cwd: dir
+            });
             assert.strictEqual(info.pc, "0x080034AC");
             assert.strictEqual(info.sp, "0x2000FF00");
             assert.strictEqual(info.lr, "0x08003401");
@@ -105,7 +113,7 @@ assert.strictEqual(decodeFaultRegisters({ cfsr: 0, icsr: 15 }).exception.name, "
         }
     }
     console.log("Fault info tests passed");
-})().catch(error => {
+})().catch((error) => {
     console.error(error);
     process.exitCode = 1;
 });

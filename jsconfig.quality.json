@@ -10,12 +10,6 @@
     "strict": false,
     "types": ["node"]
   },
-  "include": [
-    "src/probeCoordinator.js",
-    "src/webviewAssets.js",
-    "src/services/**/*.js",
-    "scripts/release.js",
-    "scripts/run-tests.js",
-    "test/hil/run-hil.js"
-  ]
+  "include": ["src/**/*.js", "skills/**/*.js", "scripts/**/*.js", "test/hil/run-hil.js"],
+  "exclude": ["src/webview/**/*.js"]
 }

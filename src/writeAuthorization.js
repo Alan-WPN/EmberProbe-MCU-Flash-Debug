@@ -11,7 +11,7 @@ function writePlanIdentity(plan) {
     const elf = plan?.elfResult?.elf || {};
     return {
         elf: { path: String(elf.path || ""), sha256: String(elf.sha256 || "") },
-        items: (plan?.items || []).map(item => ({
+        items: (plan?.items || []).map((item) => ({
             name: item.name,
             address: Number(item.address) >>> 0,
             type: item.type,
@@ -21,7 +21,10 @@ function writePlanIdentity(plan) {
 }
 
 function fingerprintWritePlan(plan) {
-    return crypto.createHash("sha256").update(JSON.stringify(writePlanIdentity(plan))).digest("hex");
+    return crypto
+        .createHash("sha256")
+        .update(JSON.stringify(writePlanIdentity(plan)))
+        .digest("hex");
 }
 
 function authorizationError(message, code, details) {
@@ -48,7 +51,11 @@ class WriteAuthorization {
     status() {
         const trusted = this.isTrusted();
         return trusted
-            ? { trusted: true, scope: "workspace", trustedExpiresAt: new Date(this.storage.get(this.storageKey) + this.trustTtlMs).toISOString() }
+            ? {
+                  trusted: true,
+                  scope: "workspace",
+                  trustedExpiresAt: new Date(this.storage.get(this.storageKey) + this.trustTtlMs).toISOString()
+              }
             : { trusted: false, scope: "workspace" };
     }
 
@@ -73,10 +80,11 @@ class WriteAuthorization {
                 confirmationId,
                 expiresAt: new Date(expiresAt).toISOString(),
                 scope: "workspace",
-                question: "Allow this MCU memory write? Choose once, or allow future writes in this workspace without asking again.",
+                question:
+                    "Allow this MCU memory write? Choose once, or allow future writes in this workspace without asking again.",
                 choices: ["once", "workspace"],
                 elf: identity.elf,
-                items: (plan.items || []).map(item => ({
+                items: (plan.items || []).map((item) => ({
                     name: item.name,
                     address: `0x${(Number(item.address) >>> 0).toString(16).toUpperCase()}`,
                     type: item.type,
@@ -90,7 +98,8 @@ class WriteAuthorization {
         if (this.isTrusted()) return { authorized: true, mode: "workspace", remember: false };
         const confirmationId = String(options.confirmationId || "").trim();
         if (!confirmationId) {
-            if (options.remember) throw authorizationError("--remember requires a valid confirmation ID", "WRITE_CONFIRMATION_INVALID");
+            if (options.remember)
+                throw authorizationError("--remember requires a valid confirmation ID", "WRITE_CONFIRMATION_INVALID");
             return this._request(plan);
         }
 
@@ -98,11 +107,17 @@ class WriteAuthorization {
         const pending = this.pending.get(confirmationId);
         this.pending.delete(confirmationId);
         if (!pending || pending.expiresAt <= this.now()) {
-            throw authorizationError("Write confirmation is invalid or expired; request confirmation again", "WRITE_CONFIRMATION_INVALID");
+            throw authorizationError(
+                "Write confirmation is invalid or expired; request confirmation again",
+                "WRITE_CONFIRMATION_INVALID"
+            );
         }
 
         const currentIdentity = writePlanIdentity(plan);
-        if (currentIdentity.elf.path !== pending.identity.elf.path || currentIdentity.elf.sha256 !== pending.identity.elf.sha256) {
+        if (
+            currentIdentity.elf.path !== pending.identity.elf.path ||
+            currentIdentity.elf.sha256 !== pending.identity.elf.sha256
+        ) {
             throw authorizationError(
                 "The configured ELF changed after write confirmation was requested; review the new addresses and confirm again",
                 "ELF_CHANGED_DURING_WRITE_CONFIRMATION",
@@ -110,7 +125,10 @@ class WriteAuthorization {
             );
         }
         if (fingerprintWritePlan(plan) !== pending.fingerprint) {
-            throw authorizationError("The requested variables or values changed; request confirmation again", "WRITE_CONFIRMATION_INVALID");
+            throw authorizationError(
+                "The requested variables or values changed; request confirmation again",
+                "WRITE_CONFIRMATION_INVALID"
+            );
         }
         return { authorized: true, mode: options.remember ? "workspace" : "once", remember: !!options.remember };
     }
@@ -127,4 +145,11 @@ class WriteAuthorization {
     }
 }
 
-module.exports = { WriteAuthorization, writePlanIdentity, fingerprintWritePlan, DEFAULT_STORAGE_KEY, DEFAULT_TTL_MS, DEFAULT_TRUST_TTL_MS };
+module.exports = {
+    WriteAuthorization,
+    writePlanIdentity,
+    fingerprintWritePlan,
+    DEFAULT_STORAGE_KEY,
+    DEFAULT_TTL_MS,
+    DEFAULT_TRUST_TTL_MS
+};

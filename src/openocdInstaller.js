@@ -21,7 +21,11 @@ function getBundledArchive(context) {
     if (!plat) return null;
     const rel = path.join(BUNDLED_DIR, `openocd-${plat}.tar.gz`);
     const abs = context.asAbsolutePath(rel);
-    try { fs.accessSync(abs, fs.constants.R_OK); } catch (e) { return null; }
+    try {
+        fs.accessSync(abs, fs.constants.R_OK);
+    } catch (e) {
+        return null;
+    }
     return abs;
 }
 
@@ -50,11 +54,16 @@ function locateOpenOcdBinary(root) {
     const candidates = [
         path.join(root, "bin", OPENOCD_BIN),
         // 兜底：解压出带版本号子目录的情况
-        ...globFirst(root, d => fs.existsSync(path.join(d, "bin", OPENOCD_BIN)))
-            .map(d => path.join(d, "bin", OPENOCD_BIN))
+        ...globFirst(root, (d) => fs.existsSync(path.join(d, "bin", OPENOCD_BIN))).map((d) =>
+            path.join(d, "bin", OPENOCD_BIN)
+        )
     ];
     for (const p of candidates) {
-        try { if (fs.existsSync(p)) return p; } catch (e) { /* continue */ }
+        try {
+            if (fs.existsSync(p)) return p;
+        } catch (e) {
+            /* continue */
+        }
     }
     return null;
 }
@@ -66,7 +75,9 @@ function globFirst(root, predicate) {
             const full = path.join(root, name);
             if (fs.statSync(full).isDirectory() && predicate(full)) out.push(full);
         }
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+        /* ignore */
+    }
     return out;
 }
 
@@ -85,7 +96,10 @@ function assertSafeEntryPath(staging, entryPath) {
 async function installBundledOpenOcd(vscode, context, progress, verifyBinary) {
     const archive = getBundledArchive(context);
     if (!archive) {
-        return { ok: false, error: `当前平台（${process.platform}-${process.arch}）暂无预置 OpenOCD 包，请手动安装后用「配置 OpenOCD 路径」选择` };
+        return {
+            ok: false,
+            error: `当前平台（${process.platform}-${process.arch}）暂无预置 OpenOCD 包，请手动安装后用「配置 OpenOCD 路径」选择`
+        };
     }
     const dest = installDir(context);
     const parent = path.dirname(dest);
@@ -99,9 +113,14 @@ async function installBundledOpenOcd(vscode, context, progress, verifyBinary) {
     let processed = 0;
     try {
         // 先统计条目数以计算百分比，避免进度跳跃
-        await tar.t({ file: archive, onentry: () => { total++; } });
+        await tar.t({
+            file: archive,
+            onentry: () => {
+                total++;
+            }
+        });
         if (total === 0) total = 1;
-        if (progress) progress({ message: "正在解压 OpenOCD…", key: 'oc.extracting' });
+        if (progress) progress({ message: "正在解压 OpenOCD…", key: "oc.extracting" });
         await tar.x({
             file: archive,
             cwd: staging,
@@ -111,19 +130,32 @@ async function installBundledOpenOcd(vscode, context, progress, verifyBinary) {
                 assertSafeEntryPath(staging, entry.path);
                 processed++;
                 if (progress && processed % 10 === 0) {
-                    const pct = Math.min(99, Math.round(processed / total * 100));
-                    progress({ message: `正在解压 OpenOCD… ${pct}%`, key: 'oc.extractingPct', params: { pct }, increment: undefined });
+                    const pct = Math.min(99, Math.round((processed / total) * 100));
+                    progress({
+                        message: `正在解压 OpenOCD… ${pct}%`,
+                        key: "oc.extractingPct",
+                        params: { pct },
+                        increment: undefined
+                    });
                 }
             }
         });
     } catch (error) {
-        try { fs.rmSync(staging, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+        try {
+            fs.rmSync(staging, { recursive: true, force: true });
+        } catch (e) {
+            /* ignore */
+        }
         return { ok: false, error: `解压失败：${error.message || error}` };
     }
 
     const bin = locateOpenOcdBinary(staging);
     if (!bin) {
-        try { fs.rmSync(staging, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+        try {
+            fs.rmSync(staging, { recursive: true, force: true });
+        } catch (e) {
+            /* ignore */
+        }
         return { ok: false, error: `解压完成但未找到 ${OPENOCD_BIN}，请检查预置包结构` };
     }
     let verification = null;
@@ -134,8 +166,12 @@ async function installBundledOpenOcd(vscode, context, progress, verifyBinary) {
             verification = { ok: false, error: error.message || String(error) };
         }
         if (!verification || verification.ok === false) {
-            try { fs.rmSync(staging, { recursive: true, force: true }); } catch (e) { /* ignore */ }
-            return { ok: false, error: `新安装验证失败：${verification?.error || 'OpenOCD 无法运行'}` };
+            try {
+                fs.rmSync(staging, { recursive: true, force: true });
+            } catch (e) {
+                /* ignore */
+            }
+            return { ok: false, error: `新安装验证失败：${verification?.error || "OpenOCD 无法运行"}` };
         }
     }
     const relativeBin = path.relative(staging, bin);
@@ -148,12 +184,30 @@ async function installBundledOpenOcd(vscode, context, progress, verifyBinary) {
         fs.renameSync(staging, dest);
     } catch (error) {
         // 新目录切换失败时恢复旧安装；staging/backup 都限定在扩展全局存储子目录内。
-        try { if (!fs.existsSync(dest) && movedOld && fs.existsSync(backup)) fs.renameSync(backup, dest); } catch (e) { /* ignore */ }
-        try { fs.rmSync(staging, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+        try {
+            if (!fs.existsSync(dest) && movedOld && fs.existsSync(backup)) fs.renameSync(backup, dest);
+        } catch (e) {
+            /* ignore */
+        }
+        try {
+            fs.rmSync(staging, { recursive: true, force: true });
+        } catch (e) {
+            /* ignore */
+        }
         return { ok: false, error: `替换旧安装失败：${error.message || error}` };
     }
-    try { fs.rmSync(backup, { recursive: true, force: true }); } catch (e) { /* 下次安装不依赖该备份 */ }
-    return { ok: true, path: path.join(dest, relativeBin), version: verification?.version || "", error: "", verification };
+    try {
+        fs.rmSync(backup, { recursive: true, force: true });
+    } catch (e) {
+        /* 下次安装不依赖该备份 */
+    }
+    return {
+        ok: true,
+        path: path.join(dest, relativeBin),
+        version: verification?.version || "",
+        error: "",
+        verification
+    };
 }
 
 module.exports = {

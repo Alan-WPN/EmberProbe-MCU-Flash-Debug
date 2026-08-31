@@ -313,7 +313,8 @@ const { AgentOrchestrator } = require("../src/services/agentOrchestrator");
         const liveService = new LiveWatchService({
             decodeValue: (bytes, type) => `${type}:${bytes[0]}`,
             decodeValueText: (_bytes, type) => (type === "u32" ? "7" : null),
-            decodeComposite: () => ({ kind: "struct" })
+            decodeComposite: () => ({ kind: "struct" }),
+            decodeBitfieldValue: () => ({ value: 3, valueText: null })
         });
         const decoded = liveService.decodeSamples(
             [

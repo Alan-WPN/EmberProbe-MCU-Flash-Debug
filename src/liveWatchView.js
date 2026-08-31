@@ -11,11 +11,12 @@ function buildCsv(names, buffers, opts) {
     opts = opts || {};
     const from = Number.isFinite(opts.from) ? opts.from : -Infinity;
     const to = Number.isFinite(opts.to) ? opts.to : Infinity;
-    function esc(value) {
-        const text = String(value);
+    function esc(value, protectFormula) {
+        let text = String(value);
+        if (protectFormula && /^[=+\-@\t\r]/.test(text)) text = "'" + text;
         return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
     }
-    const rows = [['time'].concat(names.map(esc)).join(',')];
+    const rows = [['time'].concat(names.map(function(name){return esc(name,true)})).join(',')];
     const times = [];
     const cellsByTime = new Map();
     buffers.forEach((arr, seriesIndex) => {

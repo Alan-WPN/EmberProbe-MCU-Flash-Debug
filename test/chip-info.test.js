@@ -1,20 +1,41 @@
 "use strict";
 const assert = require("assert");
-const { buildChipInfoCommands, decodeCpuid, parseMdwWord, parseMdwDump, parseRegLine, parseKv, splitIdcode, normalizeTransport, seriesFromTarget, seriesFromFlashDriver, uidBaseForTarget, idcodeBaseForTarget, flashSizeBaseForTarget, formatUid, normalizeFlashSize, decodeRomPidr, assessAuthenticity, deriveVendor, chooseIdcode, ALL_IDCODE_ADDRS } = require("../src/chipInfo");
+const {
+    buildChipInfoCommands,
+    decodeCpuid,
+    parseMdwWord,
+    parseMdwDump,
+    parseRegLine,
+    parseKv,
+    splitIdcode,
+    normalizeTransport,
+    seriesFromTarget,
+    seriesFromFlashDriver,
+    uidBaseForTarget,
+    idcodeBaseForTarget,
+    flashSizeBaseForTarget,
+    formatUid,
+    normalizeFlashSize,
+    decodeRomPidr,
+    assessAuthenticity,
+    deriveVendor,
+    chooseIdcode,
+    ALL_IDCODE_ADDRS
+} = require("../src/chipInfo");
 
 // SCB CPUID 0x410FC241 → Cortex-M4 r0p1（ARM）
-const m4 = decodeCpuid(0x410FC241);
+const m4 = decodeCpuid(0x410fc241);
 assert.strictEqual(m4.core, "Cortex-M4");
 assert.strictEqual(m4.revision, "r0p1");
 assert.strictEqual(m4.implementer, "ARM");
 assert.strictEqual(m4.raw, "0x410FC241");
 
 // 覆盖常见 Cortex-M part number（bits[15:4]）
-assert.strictEqual(decodeCpuid(0x410CC200).core, "Cortex-M0");
-assert.strictEqual(decodeCpuid(0x410CC601).core, "Cortex-M0+");
-assert.strictEqual(decodeCpuid(0x412FC231).core, "Cortex-M3");
-assert.strictEqual(decodeCpuid(0x410FC271).core, "Cortex-M7");
-assert.strictEqual(decodeCpuid(0x410CD200).core, "Cortex-M23");
+assert.strictEqual(decodeCpuid(0x410cc200).core, "Cortex-M0");
+assert.strictEqual(decodeCpuid(0x410cc601).core, "Cortex-M0+");
+assert.strictEqual(decodeCpuid(0x412fc231).core, "Cortex-M3");
+assert.strictEqual(decodeCpuid(0x410fc271).core, "Cortex-M7");
+assert.strictEqual(decodeCpuid(0x410cd200).core, "Cortex-M23");
 
 // 未知 part number：core 为空但仍给出 raw / revision
 const unknown = decodeCpuid(0x41000000);
@@ -28,9 +49,9 @@ assert.strictEqual(decodeCpuid(undefined), null);
 assert.strictEqual(decodeCpuid(NaN), null);
 
 // mdw 输出行解析（大小写不敏感，带地址校验）
-assert.strictEqual(parseMdwWord("0xe000ed00: 410fc241", 0xE000ED00), 0x410fc241);
+assert.strictEqual(parseMdwWord("0xe000ed00: 410fc241", 0xe000ed00), 0x410fc241);
 assert.strictEqual(parseMdwWord("0xE000ED00: 410FC241"), 0x410fc241);
-assert.strictEqual(parseMdwWord("0x20000000: deadbeef", 0xE000ED00), null); // 地址不匹配应丢弃
+assert.strictEqual(parseMdwWord("0x20000000: deadbeef", 0xe000ed00), null); // 地址不匹配应丢弃
 assert.strictEqual(parseMdwWord("Info : hla_swd"), null); // 非内存转储行
 
 // EP_KV 标记行解析
@@ -133,7 +154,10 @@ assert.strictEqual(assessAuthenticity("STM32F4x", "").authenticity, "");
 
 // deriveVendor：仅采信 ROM 表中已知的非 Arm 硬件厂商码；无法确认时保持未知
 assert.strictEqual(deriveVendor("STM32F4x", { key: "0:0x20", designer: "STMicroelectronics" }), "STMicroelectronics");
-assert.strictEqual(deriveVendor("STM32F4x", { key: "11:0x23", designer: "Apex Microelectronics (Geehy)" }), "Apex Microelectronics (Geehy)");
+assert.strictEqual(
+    deriveVendor("STM32F4x", { key: "11:0x23", designer: "Apex Microelectronics (Geehy)" }),
+    "Apex Microelectronics (Geehy)"
+);
 assert.strictEqual(deriveVendor("STM32H7x", { key: "4:0x3b", designer: "Arm" }), "");
 assert.strictEqual(deriveVendor("STM32H7x", null), "");
 assert.strictEqual(deriveVendor("NRF52", { key: "2:0x44", designer: "Nordic Semiconductor" }), "Nordic Semiconductor");
@@ -149,7 +173,11 @@ assert.strictEqual(chooseIdcode({ 0xe0042000: 0x00002001 }), null);
 assert.strictEqual(chooseIdcode({ 0xe0042000: 0x00000000, 0x40015800: 0x0000ffff }, 0xe0042000), null);
 assert.strictEqual(chooseIdcode({}, 0xe0042000), null);
 // 候选地址集应覆盖经典/F0系/H7 三类 DBGMCU 地址
-assert.ok(ALL_IDCODE_ADDRS.includes(0xe0042000) && ALL_IDCODE_ADDRS.includes(0x40015800) && ALL_IDCODE_ADDRS.includes(0x5c001000));
+assert.ok(
+    ALL_IDCODE_ADDRS.includes(0xe0042000) &&
+        ALL_IDCODE_ADDRS.includes(0x40015800) &&
+        ALL_IDCODE_ADDRS.includes(0x5c001000)
+);
 
 // 芯片信息读取不得改变运行目标状态。H7 running 分支只读本系列身份寄存器，
 // flash probe 与跨系列扫描只能位于原本 halted 的分支。
@@ -157,7 +185,7 @@ const chipInfoCommands = buildChipInfoCommands("stm32h7x.cfg");
 const allChipInfoCommands = chipInfoCommands.join("\n");
 assert.ok(!/(?:^|[;{\s])halt(?:[;}\s]|$)/.test(allChipInfoCommands), "chip info must never halt a running target");
 assert.ok(!/(?:^|[;{\s])resume(?:[;}\s]|$)/.test(allChipInfoCommands), "chip info must never resume a target");
-const identityCommand = chipInfoCommands.find(command => command.includes("flash probe 0"));
+const identityCommand = chipInfoCommands.find((command) => command.includes("flash probe 0"));
 assert.ok(identityCommand && identityCommand.includes('curstate] eq "halted"'));
 const runningIdentityBranch = identityCommand.split("} else {")[1];
 assert.ok(runningIdentityBranch.includes("mdw 0x5c001000"));
