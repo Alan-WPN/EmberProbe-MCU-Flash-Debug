@@ -6,6 +6,13 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-08-31
+
+### Fixed
+
+- 重建 ELF 后刷新变量列表时，侧栏与所有实时图表中已选变量会按名称重新绑定当前 ELF 的地址、类型和复合布局，移除已不存在的变量、清除旧值并立即刷新采样计划，不再继续读取旧地址。
+- Cortex-Debug 启动增加有界恢复：即使 VS Code 的 `startDebugging` 一直未返回或调试适配器提前退出，也会结束侧栏“执行中”状态、停止残留会话、释放托管 OpenOCD 并恢复采样；Windows Cortex-Debug 1.12.1 使用针对其固定 GDB 启动超时的诊断与 15 秒恢复边界，其他环境保留 60 秒安全上限。
+
 ## [0.7.3] - 2026-08-30
 
 ### Added
