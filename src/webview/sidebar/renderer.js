@@ -1516,6 +1516,12 @@ window.addEventListener("message", (e) => {
     else if (m.type === "commandError") setStat("error", m.key || "", m.params, m.error || t("sb.commandFailed"));
     else if (m.type === "sidebarWatchList") {
         sideWatch = (m.items || []).slice();
+        if (m.resetValues) {
+            sideWatch.forEach((item) => {
+                delete latest[item.name];
+                delete latestText[item.name];
+            });
+        }
         renderValues();
         renderAvailable();
     } else if (m.type === "sidebarWriteList") {

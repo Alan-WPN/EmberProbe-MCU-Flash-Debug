@@ -55,7 +55,9 @@ function activate(context) {
                     onWillReceiveMessage: message => provider.handleDebugAdapterRequest(session, message),
                     onDidSendMessage: message => provider.handleDebugAdapterMessage(session, message),
                     onError: error => console.error("Cortex-Debug adapter error:", error),
-                    onExit: () => {}
+                    onExit: () => provider.handleDebugAdapterExit(session)?.catch(error => {
+                        console.error("Unable to clean up after Cortex-Debug adapter exit:", error);
+                    })
                 };
             }
         }),

@@ -336,6 +336,10 @@ module.exports = Object.freeze({
     "msg.debugConfigName": "MCU Debug (OpenOCD)",
     "msg.debugStartFailed": "Failed to start the debug session. Check the Cortex-Debug and OpenOCD configuration.",
     "msg.debugFailed": "Failed to start debugging: {error}",
+    "msg.debugStartTimeout":
+        "Cortex-Debug did not finish starting within {seconds} seconds. The session was stopped and OpenOCD was released. Check that GDB starts normally from a terminal.",
+    "msg.debugStartTimeoutWin":
+        "Cortex-Debug did not finish starting within {seconds} seconds. The session was stopped and OpenOCD was released. Cortex-Debug {version} on Windows may be affected by its fixed five-second GDB startup timeout; use a faster-starting GDB such as 13.x, or upgrade to a stable release containing the fix. A pre-release is not required.",
     "msg.downloadBusy": "A download is already running; please wait for it to finish",
     "msg.agentReadBusy": "The Agent is reading variables; try again shortly",
     "msg.debugBusy": "A debug session is starting; try again shortly",
@@ -363,6 +367,7 @@ module.exports = Object.freeze({
     "live.starting": "Live watch is starting; please wait",
     "live.debugActive": "A debug session is active and the probe is busy; stop debugging before starting live watch",
     "live.debugWaiting": "Debugging",
+    "live.debugStartTimeout": "Debug startup timed out; OpenOCD was released",
     "live.debugSharedConnecting": "Connecting to the shared OpenOCD service…",
     "live.debugRuntimeSampling": "Sampling",
     "live.debugTclDegraded": "Shared OpenOCD Tcl reads are unavailable; waiting for a DAP pause",

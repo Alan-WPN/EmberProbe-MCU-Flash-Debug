@@ -49,6 +49,8 @@ const fs = require("fs");
 const os = require("os");
 const crypto = require("crypto");
 const i18n = require("./i18n");
+const DEBUG_START_WATCHDOG_MS = 60000;
+const CORTEX_DEBUG_1121_WINDOWS_TIMEOUT_MS = 15000;
 // 调试器配置列表
 const DEBUGGER_LIST = [
     "altera-usb-blaster.cfg",
@@ -442,6 +444,12 @@ class MainViewProvider {
         this._latestSidebarSamples = this._liveWatchService.latestSidebarSamples;
         this._samplingIntent = false;
         this._debugCommandPending = false;
+        this._debugStartupTimer = null;
+        this._debugStartupPending = false;
+        this._debugStartupSession = null;
+        this._debugStartupTimeoutMs = 0;
+        this._debugStartupGateResolve = null;
+        this._terminatedDebugSessionIds = new Set();
         this._debugReadPlanKey = "";
         this._shutdownPromise = null;
         this._liveIntervalMs = 100;
@@ -773,6 +781,7 @@ class MainViewProvider {
         // 4. 启动调试（核心修改4：处理TypeScript类型匹配+路径清洗）
         this.commandHandlers["mcu-vscode.debug"] = async (resource) => {
             let probePrepared = false;
+            let startAccepted = false;
             try {
                 if (this._agentReadRunning) {
                     vscode.window.showWarningMessage(this._t("msg.agentReadBusy"));
@@ -838,10 +847,20 @@ class MainViewProvider {
                 if (svdPath) debugConfig.svdFile = svdPath;
                 const cortexTools = resolveCortexToolchainForWorkspace(vscode, workspaceFolder);
                 if (cortexTools?.objdumpPath) debugConfig.objdumpPath = cortexTools.objdumpPath;
-                const started = await vscode.debug.startDebugging(workspaceFolder, debugConfig, {
-                    suppressDebugView: true
-                });
+                const startupGate = this._armDebugStartupWatchdog();
+                const startRequest = Promise.resolve(
+                    vscode.debug.startDebugging(workspaceFolder, debugConfig, { suppressDebugView: true })
+                ).then(
+                    (started) => ({ kind: "result", started }),
+                    (error) => ({ kind: "error", error })
+                );
+                const outcome = await Promise.race([startRequest, startupGate]);
+                if (outcome.kind === "error") throw outcome.error;
+                if (outcome.kind === "timeout" || outcome.kind === "terminated") return false;
+                const started = outcome.kind === "ready" ? true : outcome.started;
+                startAccepted = started === true;
                 if (!started) {
+                    this._clearDebugStartupWatchdog();
                     vscode.window.showErrorMessage(this._t("msg.debugStartFailed"));
                     if (this._debugStarting) this._debugStarting = false;
                     await this._stopManagedDebugServer();
@@ -850,6 +869,7 @@ class MainViewProvider {
                 }
                 return true;
             } catch (err) {
+                this._clearDebugStartupWatchdog();
                 const errorMsg = err.message;
                 console.error("调试启动失败：", errorMsg);
                 vscode.window.showErrorMessage(this._t("msg.debugFailed", { error: errorMsg }));
@@ -861,6 +881,7 @@ class MainViewProvider {
                 throw err; // 上抛给消息分发器，向 Webview 反馈 commandError 而非 commandSuccess
             } finally {
                 if (this._debugStarting) this._debugStarting = false;
+                if (!startAccepted) this._clearDebugStartupWatchdog();
                 this._debugCommandPending = false;
             }
         };
@@ -1458,6 +1479,90 @@ class MainViewProvider {
             }
         }
         if (this._debugServerRunning) this._debugServerRunning = false;
+    }
+    _armDebugStartupWatchdog() {
+        this._clearDebugStartupWatchdog();
+        this._debugStartupPending = true;
+        const version = vscode.extensions.getExtension("marus25.cortex-debug")?.packageJSON?.version || "";
+        this._debugStartupTimeoutMs =
+            process.platform === "win32" && version === "1.12.1"
+                ? CORTEX_DEBUG_1121_WINDOWS_TIMEOUT_MS
+                : DEBUG_START_WATCHDOG_MS;
+        return new Promise((resolve) => {
+            this._debugStartupGateResolve = resolve;
+            this._debugStartupTimer = setTimeout(() => {
+                const gateResolve = this._debugStartupGateResolve;
+                const recovery = this._recoverDebugStartupTimeout();
+                gateResolve?.({ kind: "timeout" });
+                recovery.catch((error) =>
+                    console.error("Unable to recover from a Cortex-Debug startup timeout:", error)
+                );
+            }, this._debugStartupTimeoutMs);
+        });
+    }
+    _matchesManagedDebugSession(session) {
+        return !!(
+            session &&
+            this._managedDebugToken &&
+            session.configuration?.__emberprobeManagedToken === this._managedDebugToken
+        );
+    }
+    _clearDebugStartupWatchdog(outcome) {
+        const gateResolve = this._debugStartupGateResolve;
+        if (this._debugStartupTimer) clearTimeout(this._debugStartupTimer);
+        this._debugStartupTimer = null;
+        this._debugStartupPending = false;
+        this._debugStartupSession = null;
+        this._debugStartupTimeoutMs = 0;
+        this._debugStartupGateResolve = null;
+        if (outcome) gateResolve?.(outcome);
+    }
+    _markDebugStartupReady(session) {
+        if (!this._debugStartupPending) return;
+        if (!this._debugStartupSession && !this._matchesManagedDebugSession(session)) return;
+        if (this._debugStartupSession && session && this._debugStartupSession.id !== session.id) return;
+        this._clearDebugStartupWatchdog({ kind: "ready" });
+    }
+    async _recoverDebugStartupTimeout() {
+        if (!this._debugStartupPending) return;
+        const session = this._debugStartupSession;
+        const timeoutMs = this._debugStartupTimeoutMs || DEBUG_START_WATCHDOG_MS;
+        this._clearDebugStartupWatchdog();
+        this._debugStarting = false;
+        this._debugCommandPending = false;
+        this._postConsumerStatuses(
+            {
+                mode: "debug-start-failed",
+                key: "live.debugStartTimeout",
+                source: "none",
+                canRead: false,
+                canWrite: false
+            },
+            true
+        );
+        if (session) {
+            const managed = !!this._managedDebugSessionId && session.id === this._managedDebugSessionId;
+            this._terminatedDebugSessionIds.add(session.id);
+            try {
+                await Promise.race([
+                    Promise.resolve(vscode.debug.stopDebugging(session)).catch(() => false),
+                    new Promise((resolve) => setTimeout(() => resolve(false), 2000))
+                ]);
+            } catch {
+                /* The adapter may already have exited. */
+            }
+            this._debugBridge.detach(session);
+            this._debugReadPlanKey = "";
+            if (managed || this._managedDebugServer) await this._stopManagedDebugServer();
+            await this.restoreSamplingAfterDebug();
+        } else {
+            await this._stopManagedDebugServer();
+            await this.restoreSamplingAfterDebug();
+        }
+        const version = vscode.extensions.getExtension("marus25.cortex-debug")?.packageJSON?.version || "";
+        const key =
+            process.platform === "win32" && version === "1.12.1" ? "msg.debugStartTimeoutWin" : "msg.debugStartTimeout";
+        vscode.window.showErrorMessage(this._t(key, { seconds: timeoutMs / 1000, version }));
     }
     async _quiesceManagedRuntimeRead() {
         const server = this._managedDebugServer;
@@ -2256,6 +2361,26 @@ class MainViewProvider {
     _invalidateWatchList(key) {
         this._watchListCache.delete(key);
     }
+    // ELF 地址可能在重建后发生变化；按变量名重新绑定所有查看列表，避免继续读取旧地址。
+    async _rebindWatchLists(symbols) {
+        const entries = Array.from(this._livePanels.values());
+        const keys = new Set([CACHE_KEYS.sidebarWatchList, ...entries.map((entry) => entry.watchKey)]);
+        const rebound = new Map();
+        this._watchListCache.clear();
+        for (const key of keys) {
+            const items = this._context.workspaceState.get(key) || [];
+            const normalized = validation.normalizeWatchList(items, symbols);
+            if (JSON.stringify(normalized) !== JSON.stringify(items))
+                await this._context.workspaceState.update(key, normalized);
+            this._watchListCache.set(key, normalized);
+            rebound.set(key, normalized);
+        }
+        // 旧地址对应的最新值不能继续显示在新 ELF 变量上。
+        this._latestSidebarSamples.clear();
+        for (const entry of entries) entry.latestSamples.clear();
+        this._invalidateConsumerTypes();
+        return { entries, rebound };
+    }
     _syncGraphTarget(entry) {
         if (!entry || !entry.ready) return;
         const post = entry.post;
@@ -2722,6 +2847,8 @@ class MainViewProvider {
     }
     handleDebugSessionStart(session) {
         if (!session || session.type !== "cortex-debug") return;
+        if (this._terminatedDebugSessionIds.has(session.id)) return;
+        if (this._debugStartupPending && this._matchesManagedDebugSession(session)) this._debugStartupSession = session;
         this._debugReadPlanKey = this._activeReadPlan()
             .map((item) => `${item.name}:${item.address}:${item.size}`)
             .join("|");
@@ -2739,6 +2866,7 @@ class MainViewProvider {
         this._debugBridge.setIntent(this._samplingIntent);
     }
     handleDebugAdapterMessage(session, message) {
+        if (message?.type === "event" && message.event === "initialized") this._markDebugStartupReady(session);
         this._debugBridge.handleMessage(session, message);
     }
     handleDebugAdapterRequest(session, message) {
@@ -2746,12 +2874,28 @@ class MainViewProvider {
     }
     async handleDebugSessionTerminate(session) {
         if (!session || session.type !== "cortex-debug") return;
+        if (this._terminatedDebugSessionIds.has(session.id)) return;
+        this._terminatedDebugSessionIds.add(session.id);
+        if (
+            this._debugStartupPending &&
+            (this._debugStartupSession?.id === session.id || this._matchesManagedDebugSession(session))
+        ) {
+            this._clearDebugStartupWatchdog({ kind: "terminated" });
+        }
         const managed = !!this._managedDebugSessionId && session.id === this._managedDebugSessionId;
         this._debugBridge.detach(session);
         if (this._debugBridge.hasSession) return;
         this._debugReadPlanKey = "";
         if (managed) await this._stopManagedDebugServer();
         await this.restoreSamplingAfterDebug();
+    }
+    handleDebugAdapterExit(session) {
+        if (!session || session.type !== "cortex-debug") return;
+        const managedStartup =
+            this._debugStartupPending &&
+            (this._debugStartupSession?.id === session.id || this._matchesManagedDebugSession(session));
+        if (!managedStartup && !this._debugBridge.hasAnySession) return;
+        return this.handleDebugSessionTerminate(session);
     }
     async restoreSamplingAfterDebug() {
         if (this._debugBridge.hasAnySession) {
@@ -2787,6 +2931,7 @@ class MainViewProvider {
     shutdown() {
         if (this._shutdownPromise) return this._shutdownPromise;
         this._shutdownPromise = (async () => {
+            this._clearDebugStartupWatchdog();
             const managedSession = this._debugBridge.activeSession;
             if (managedSession && managedSession.id === this._managedDebugSessionId) {
                 try {
@@ -2961,15 +3106,39 @@ class MainViewProvider {
                     break;
                 }
                 case "refreshVariables": {
-                    // 重建 ELF 后手动刷新：清空符号缓存并重新解析、回送变量列表
+                    // 重建 ELF 后手动刷新：重新解析并按变量名重绑定所有查看列表
                     this._elfService.invalidate();
                     try {
                         const result = this.readElfSymbols();
+                        const { entries, rebound } = await this._rebindWatchLists(result.symbols);
+                        webviewView.webview.postMessage({
+                            type: "sidebarWatchList",
+                            items: rebound.get(CACHE_KEYS.sidebarWatchList) || [],
+                            resetValues: true
+                        });
+                        for (const entry of entries) {
+                            if (entry.ready)
+                                entry.post({
+                                    type: "watchList",
+                                    items: rebound.get(entry.watchKey) || [],
+                                    resetValues: true
+                                });
+                        }
                         webviewView.webview.postMessage({
                             type: "availableVariables",
                             symbols: result.symbols,
                             warnings: result.warnings
                         });
+                        try {
+                            await this._refreshSamplingPlan();
+                        } catch (error) {
+                            this._postLive({
+                                type: "liveError",
+                                key: error.i18nKey,
+                                params: error.i18nParams,
+                                message: error.message
+                            });
+                        }
                     } catch (error) {
                         webviewView.webview.postMessage({
                             type: "availableVariables",

@@ -1737,6 +1737,12 @@ window.addEventListener("message", function (e) {
     if (!m) return;
     if (m.type === "watchList") {
         watch = (m.items || []).slice();
+        if (m.resetValues) {
+            watch.forEach(function (item) {
+                delete latest[item.name];
+                delete latestText[item.name];
+            });
+        }
         Object.keys(hidden).forEach(function (n) {
             if (
                 !watch.some(function (w) {

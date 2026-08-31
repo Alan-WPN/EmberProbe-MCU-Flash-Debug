@@ -420,6 +420,10 @@ const chipServiceSource = fs.readFileSync(require.resolve("../src/services/chipI
 const agentBridgeSource = fs.readFileSync(require.resolve("../src/agentBridge"), "utf8");
 assert.ok(!extensionSource.includes("withAgentBridge"), "ordinary public commands must not start the Agent Bridge");
 const resolveViewSource = providerSource.slice(providerSource.indexOf("resolveWebviewView(webviewView)"));
+const refreshVariablesSource = providerText.slice(
+    providerText.indexOf('case "refreshVariables"'),
+    providerText.indexOf('case "saveSidebarWatch"')
+);
 assert.ok(
     !resolveViewSource.slice(0, resolveViewSource.indexOf("webviewView.webview.options")).includes("startAgentBridge"),
     "opening the sidebar must not start the Agent Bridge"
@@ -433,6 +437,14 @@ assert.ok(
     "stopping the bridge should remove its empty workspace directory"
 );
 assert.ok(providerSource.includes("type: 'openocdStatus'"), "provider should publish OpenOCD state to the sidebar");
+assert.ok(
+    refreshVariablesSource.includes("_rebindWatchLists") &&
+        refreshVariablesSource.includes("_refreshSamplingPlan") &&
+        refreshVariablesSource.includes('type: "sidebarWatchList"') &&
+        sidebar.includes("m.resetValues") &&
+        panel.includes("m.resetValues"),
+    "refreshing the ELF must rebind persisted watch lists and refresh the active sampling plan"
+);
 assert.ok(extensionSource.includes("manageAgentSkills"), "extension should register the Agent Skills management menu");
 assert.ok(
     providerSource.includes("case 'exportCsv'") && providerSource.includes("showSaveDialog"),
