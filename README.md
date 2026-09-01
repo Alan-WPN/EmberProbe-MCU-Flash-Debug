@@ -12,7 +12,7 @@ EmberProbe 是一款面向 Cortex-M 开发的 VS Code 扩展。它基于 OpenOCD
 - 实时变量观测：在目标运行时非侵入式读取 Cortex-M 内存；侧边栏提供独立数值列表，可同时打开多个拥有独立观察列表和历史缓冲的实时图表面板。
 - 实时变量写入：在目标运行时实时更改内存，提供滑条、输入框、鼠标滚轮多种值更改方式，更改后自动回读。
 - Cortex-Debug 联动：启动断点调试。
-- 可选安装十个 Agent Skills，覆盖固件下载与校验、实时变量读写、SVD 外设调试、Cortex-Debug 会话/断点控制、芯片和故障信息读取、ELF 分析，以及配置同步。
+- 可选安装八个 Agent Skills，覆盖固件编程与校验、实时变量读写、SVD 外设调试、Cortex-Debug 会话/断点控制、芯片和故障信息读取、ELF 分析，以及配置同步。
 
 ## 环境要求
 
@@ -33,14 +33,12 @@ EmberProbe 是一款面向 Cortex-M 开发的 VS Code 扩展。它基于 OpenOCD
 
 ## Agent Skills
 
-- `mcu-download`：检测并下载最新 ELF，预检和执行结果包含 ELF SHA-256 指纹。
-- `mcu-live-watch`：单次读取、分析趋势，或按面板/曲线/时间区间读取与导出真实图表历史 CSV。
+- `mcu-flash`：检测并编程最新 ELF，或独立校验片上 Flash；预检和执行结果包含 ELF SHA-256 指纹。
+- `mcu-variables`：单次读取、分析趋势、导出图表历史 CSV，或经两阶段确认安全写入标量及复合变量叶子。
 - `mcu-chip-info`：按 `identity`、`debug`、`runtime` 分组或指定字段读取芯片信息。
 - `mcu-config`：读取或修改 ELF、调试器、MCU、SVD、OpenOCD 和采样参数。
-- `mcu-var-write`：按变量名安全写入标量或复合变量叶子成员，使用两阶段确认、ELF 指纹绑定和写后回读校验。
 - `mcu-fault-analyzer`：读取并解码 Cortex-M 故障寄存器，并使用当前 ELF 对 PC/LR 进行符号化。
 - `mcu-elf-analyze`：离线分析当前 ELF 的 Flash/RAM 占用、段布局和大符号，不占用调试探针。
-- `mcu-flash-verify`：读取目标 Flash 并与当前 ELF 的可加载内容进行校验。
 - `mcu-peripheral-debug`：解析工作区 SVD，查询、读取和解码外设寄存器/位域，并通过每次一次性确认执行暂停态安全写入。
 - `mcu-debug-control`：启动、停止和控制 Cortex-Debug 会话，支持暂停/继续/单步/重启以及源码行和函数断点管理。
 

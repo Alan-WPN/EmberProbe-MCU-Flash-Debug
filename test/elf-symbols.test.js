@@ -10,7 +10,7 @@ const {
 } = require("../src/elfSymbols");
 const { parseMemoryValues } = require("../src/liveWatch");
 const { encodingToWatchType, readULEB, readSLEB, parseDwarfVariableTypes } = require("../src/dwarf");
-const liveSkill = require("../skills/mcu-live-watch/scripts/read-live");
+const liveSkill = require("../skills/mcu-variables/scripts/read");
 
 // 程序化构造最小 ELF32（小端，ARM），含 1 个 STT_OBJECT 符号 myGlobal
 function buildElf() {

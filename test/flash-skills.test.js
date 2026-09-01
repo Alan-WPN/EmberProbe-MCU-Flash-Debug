@@ -1,5 +1,5 @@
 "use strict";
-// mcu-download / mcu-flash-verify 两个 Agent Skill 的跨平台测试：
+// mcu-flash Agent Skill 中编程/校验两个入口的跨平台测试：
 // 通过 fake Agent Bridge 提供 EmberProbe 配置，用假 OpenOCD 可执行文件验证预检与执行路径。
 // Windows 上 Node 以 shell:false spawn .cmd/.sh 脚本会失败（EINVAL），因此 --execute 场景
 // 仅在 Unix 上运行；预检部分是纯 Node 逻辑，全平台执行。
@@ -97,7 +97,7 @@ function lastJsonLine(stdout) {
     try {
         await bridge.start();
 
-        const downloadPreflight = firstJsonLine((await run("mcu-download/scripts/download.js")).stdout);
+        const downloadPreflight = firstJsonLine((await run("mcu-flash/scripts/program.js")).stdout);
         assert.strictEqual(downloadPreflight.elf, elf);
         assert.strictEqual(downloadPreflight.target, "geehy/apm32f4x.cfg");
         assert.strictEqual(downloadPreflight.probe, "cmsis-dap.cfg");
@@ -110,13 +110,13 @@ function lastJsonLine(stdout) {
         assert.ok(/^[0-9a-f]{64}$/.test(downloadPreflight.elfSha256));
         assert.strictEqual(downloadPreflight.flashAuthorization.confirmationRequired, true);
 
-        const verifyPreflight = firstJsonLine((await run("mcu-flash-verify/scripts/verify.js")).stdout);
+        const verifyPreflight = firstJsonLine((await run("mcu-flash/scripts/verify.js")).stdout);
         assert.strictEqual(verifyPreflight.target, "geehy/apm32f4x.cfg");
         assert.strictEqual(verifyPreflight.probe, "cmsis-dap.cfg");
         assert.strictEqual(verifyPreflight.openocd, fakeOpenOcd);
 
         if (canRunFakeOpenOcd) {
-            const verifyRun = await run("mcu-flash-verify/scripts/verify.js", ["--execute"]);
+            const verifyRun = await run("mcu-flash/scripts/verify.js", ["--execute"]);
             const verified = lastJsonLine(verifyRun.stdout);
             assert.strictEqual(verified.verified, true);
             assert.strictEqual(verified.elf, elf);
@@ -127,11 +127,11 @@ function lastJsonLine(stdout) {
             );
 
             await assert.rejects(
-                run("mcu-download/scripts/download.js", ["--execute"]),
+                run("mcu-flash/scripts/program.js", ["--execute"]),
                 (error) => /Flash confirmation is required/.test(error.stderr || ""),
                 "download execution must not rely on --execute alone"
             );
-            const downloaded = await run("mcu-download/scripts/download.js", [
+            const downloaded = await run("mcu-flash/scripts/program.js", [
                 "--execute",
                 "--confirmation-id",
                 downloadPreflight.flashAuthorization.confirmationId
@@ -147,10 +147,10 @@ function lastJsonLine(stdout) {
             fs.writeFileSync(oldOpenOcd, '#!/bin/sh\necho "Open On-Chip Debugger 0.11.0"\nexit 0\n');
             fs.chmodSync(oldOpenOcd, 0o755);
             const oldPreflight = firstJsonLine(
-                (await run("mcu-download/scripts/download.js", ["--openocd", oldOpenOcd])).stdout
+                (await run("mcu-flash/scripts/program.js", ["--openocd", oldOpenOcd])).stdout
             );
             await assert.rejects(
-                run("mcu-download/scripts/download.js", [
+                run("mcu-flash/scripts/program.js", [
                     "--execute",
                     "--openocd",
                     oldOpenOcd,
@@ -168,7 +168,7 @@ function lastJsonLine(stdout) {
             const upperElf = path.join(bareRoot, "APP.ELF");
             fs.writeFileSync(upperElf, "upper case elf");
             const bare = await execFileAsync(process.execPath, [
-                path.resolve(__dirname, "../skills/mcu-download/scripts/download.js"),
+                path.resolve(__dirname, "../skills/mcu-flash/scripts/program.js"),
                 "--workspace",
                 bareRoot,
                 "--probe",

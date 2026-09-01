@@ -3,7 +3,15 @@ const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { inspectSkill, installSkill, uninstallSkill, inspectSkills } = require("../src/skillInstaller");
+const crypto = require("crypto");
+const {
+    inspectSkill,
+    installSkill,
+    uninstallSkill,
+    inspectSkills,
+    isUnmodifiedLegacySkill,
+    removeUnmodifiedLegacySkills
+} = require("../src/skillInstaller");
 
 (async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-skills-"));
@@ -34,6 +42,39 @@ const { inspectSkill, installSkill, uninstallSkill, inspectSkills } = require(".
         fs.rmSync(root, { recursive: true, force: true });
     }
 
+    // 重命名迁移只删除元数据、版本、文件集和指纹都与已发布版本一致的旧 Skill。
+    const legacyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-legacy-"));
+    const legacyEntry = {
+        name: "old-skill",
+        version: "1.0.0",
+        files: {
+            "SKILL.md": crypto.createHash("sha256").update("legacy skill").digest("hex"),
+            "scripts/run.js": crypto.createHash("sha256").update("legacy script").digest("hex")
+        }
+    };
+    try {
+        const legacySkill = path.join(legacyRoot, legacyEntry.name);
+        fs.mkdirSync(path.join(legacySkill, "scripts"), { recursive: true });
+        fs.writeFileSync(path.join(legacySkill, "SKILL.md"), "legacy skill");
+        fs.writeFileSync(path.join(legacySkill, "scripts", "run.js"), "legacy script");
+        fs.writeFileSync(
+            path.join(legacySkill, ".emberprobe-skill.json"),
+            JSON.stringify({ name: legacyEntry.name, version: legacyEntry.version })
+        );
+        assert.strictEqual(await isUnmodifiedLegacySkill(legacyRoot, legacyEntry), true);
+        fs.writeFileSync(path.join(legacySkill, "scripts", "run.js"), "user modified");
+        assert.strictEqual(await isUnmodifiedLegacySkill(legacyRoot, legacyEntry), false);
+        assert.deepStrictEqual(await removeUnmodifiedLegacySkills({ legacySkills: [legacyEntry] }, legacyRoot), []);
+        assert.ok(fs.existsSync(legacySkill), "modified legacy skill must be preserved");
+        fs.writeFileSync(path.join(legacySkill, "scripts", "run.js"), "legacy script");
+        assert.deepStrictEqual(await removeUnmodifiedLegacySkills({ legacySkills: [legacyEntry] }, legacyRoot), [
+            legacyEntry.name
+        ]);
+        assert.ok(!fs.existsSync(legacySkill), "unmodified legacy skill should be removed during migration");
+    } finally {
+        fs.rmSync(legacyRoot, { recursive: true, force: true });
+    }
+
     // 双范围安装/卸载:全局目录经 os.homedir() 解析,测试内重定向到临时目录保证确定性
     const realHomedir = os.homedir;
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "emberprobe-home-"));
@@ -48,7 +89,7 @@ const { inspectSkill, installSkill, uninstallSkill, inspectSkills } = require(".
     try {
         const installed = await installSkill(vscode, context, "en");
         assert.strictEqual(installed.state, "installed");
-        assert.strictEqual(installed.installed, 10);
+        assert.strictEqual(installed.installed, 8);
         assert.strictEqual(installed.scopes.workspace.state, "installed");
         assert.strictEqual(installed.scopes.global.state, "notInstalled");
         fs.unlinkSync(path.join(workspace, ".agents", "skills", "mcu-chip-info", "scripts", "read-chip.js"));
@@ -69,7 +110,7 @@ const { inspectSkill, installSkill, uninstallSkill, inspectSkills } = require(".
             "a clean global copy must not hide the workspace copy that agents resolve first"
         );
 
-        const staleExtra = path.join(workspace, ".agents", "skills", "mcu-download", "scripts", "stale.js");
+        const staleExtra = path.join(workspace, ".agents", "skills", "mcu-flash", "scripts", "stale.js");
         fs.writeFileSync(staleExtra, "stale");
         await installSkill(vscode, context, "en", "workspace");
         assert.ok(

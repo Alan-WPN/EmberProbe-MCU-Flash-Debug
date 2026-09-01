@@ -275,7 +275,7 @@ assert.strictEqual(wideTree.members[0].valueText, "18446744073709551615");
 assert.strictEqual(wideTree.members[1].valueText, "-9223372036854775808");
 
 // —— 技能脚本 variableSpecs：路径语法不被 ':' 误拆为类型 ——
-const liveSkill = require("../skills/mcu-live-watch/scripts/read-live");
+const liveSkill = require("../skills/mcu-variables/scripts/read");
 assert.deepStrictEqual(liveSkill.variableSpecs("sensor.x,buf[1:5],buf[*],counter,temp:f32"), [
     { name: "sensor.x" },
     { name: "buf[1:5]" },

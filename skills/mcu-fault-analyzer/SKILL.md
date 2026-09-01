@@ -21,7 +21,7 @@ The JSON on stdout contains `faultDetected`, `faults` (decoded flag list), `exce
 - `HFSR.FORCED` means a lower-priority fault escalated to HardFault — the root cause is in the CFSR flags, not the HardFault itself.
 - `CFSR.IMPRECISERR` means PC has already moved past the faulting store; say the reported PC is only approximate.
 - `exception.name` tells which handler the core is currently in (e.g. `HardFault`); `Thread` with no fault flags means the core is running normally.
-- If `faultDetected` is false and the target state is `running`, state clearly that no fault is pending — the problem is elsewhere (e.g. a stuck loop; suggest mcu-live-watch to inspect variables).
+- If `faultDetected` is false and the target state is `running`, state clearly that no fault is pending — the problem is elsewhere (e.g. a stuck loop; suggest mcu-variables to inspect variables).
 - If `symbolication` is `unavailable` or symbols are empty, the ELF is missing or stripped; report raw addresses and suggest a Debug build.
 
 ## Failure diagnostics

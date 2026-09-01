@@ -16,7 +16,7 @@ EmberProbe is a CommonJS VS Code extension targeting Node.js 20 and VS Code 1.85
 
 ## Coding Style & Naming Conventions
 
-Use ES2022 CommonJS (`require`/`module.exports`), four-space indentation, double quotes, semicolons, LF endings, and a 120-character print width. Prettier and ESLint are authoritative; run `npm run quality` before submitting. Use `camelCase` for functions and variables, `PascalCase` for classes, and descriptive kebab-case skill directories such as `skills/mcu-flash-verify/`. Keep hardware operations behind services and preserve existing validation and authorization boundaries.
+Use ES2022 CommonJS (`require`/`module.exports`), four-space indentation, double quotes, semicolons, LF endings, and a 120-character print width. Prettier and ESLint are authoritative; run `npm run quality` before submitting. Use `camelCase` for functions and variables, `PascalCase` for classes, and descriptive kebab-case skill directories such as `skills/mcu-flash/`. Keep hardware operations behind services and preserve existing validation and authorization boundaries.
 
 ## Testing Guidelines
 

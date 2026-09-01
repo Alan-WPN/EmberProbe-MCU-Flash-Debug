@@ -6,6 +6,10 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+### Changed
+
+- 将 `mcu-download` 与 `mcu-flash-verify` 整合为 `mcu-flash`，将 `mcu-live-watch` 与 `mcu-var-write` 整合为 `mcu-variables`；读取、写入、编程与校验仍保持独立脚本和原有授权边界，安装器仅自动清理未修改的旧 Skill 目录。
+
 ## [0.7.4] - 2026-08-31
 
 ### Fixed

@@ -2,7 +2,7 @@
 const assert = require("assert");
 const { encodeValue, decodeValue, decodeValueText } = require("../src/elfSymbols");
 const { LiveWatchSession } = require("../src/liveWatch");
-const writeSkill = require("../skills/mcu-var-write/scripts/write-var");
+const writeSkill = require("../skills/mcu-variables/scripts/write");
 
 (async () => {
     // —— encodeValue：各类型小端编码与 decodeValue 往返 ——
@@ -155,7 +155,7 @@ const writeSkill = require("../skills/mcu-var-write/scripts/write-var");
     assert.deepStrictEqual(session.watch, [], "one-shot writes must not modify the UI watch list");
     assert.strictEqual(await session.writeOnce([]), 0);
 
-    // —— write-var.js 的 --set 解析 ——
+    // —— variables/write.js 的 --set 解析 ——
     assert.deepStrictEqual(writeSkill.parseSet("kp=0.5,counter=2"), [
         { name: "kp", value: "0.5" },
         { name: "counter", value: "2" }

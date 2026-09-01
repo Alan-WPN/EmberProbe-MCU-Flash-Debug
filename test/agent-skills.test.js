@@ -8,7 +8,7 @@ const { promisify } = require("util");
 const { AgentBridge, stringifyJson } = require("../src/agentBridge");
 const { call, descriptor: descriptorOf, diagnosticForError } = require("../skills/_emberprobe/agent-client");
 const configSkill = require("../skills/mcu-config/scripts/config");
-const liveSkill = require("../skills/mcu-live-watch/scripts/read-live");
+const liveSkill = require("../skills/mcu-variables/scripts/read");
 const { LiveWatchSession } = require("../src/liveWatch");
 const execFileAsync = promisify(execFile);
 
@@ -275,7 +275,7 @@ const execFileAsync = promisify(execFile);
         const result = await call(root, "config.get", { test: true });
         assert.deepStrictEqual(result, { method: "config.get", params: { test: true } });
         const fastPath = await execFileAsync(process.execPath, [
-            path.resolve(__dirname, "../skills/mcu-live-watch/scripts/read-live.js"),
+            path.resolve(__dirname, "../skills/mcu-variables/scripts/read.js"),
             "--workspace",
             root,
             "--variables",
@@ -285,7 +285,7 @@ const execFileAsync = promisify(execFile);
         assert.strictEqual(fastPayload.method, "variables.read");
         assert.deepStrictEqual(fastPayload.params.variables, [{ name: "tick" }, { name: "sinx" }]);
         const inferredAdd = await execFileAsync(process.execPath, [
-            path.resolve(__dirname, "../skills/mcu-live-watch/scripts/read-live.js"),
+            path.resolve(__dirname, "../skills/mcu-variables/scripts/read.js"),
             "--workspace",
             root,
             "--variables",
@@ -301,7 +301,7 @@ const execFileAsync = promisify(execFile);
             "--add-to without suffixes must let the extension use DWARF types"
         );
         const explicitAdd = await execFileAsync(process.execPath, [
-            path.resolve(__dirname, "../skills/mcu-live-watch/scripts/read-live.js"),
+            path.resolve(__dirname, "../skills/mcu-variables/scripts/read.js"),
             "--workspace",
             root,
             "--variables",
@@ -312,7 +312,7 @@ const execFileAsync = promisify(execFile);
         const explicitAddPayload = JSON.parse(explicitAdd.stdout);
         assert.deepStrictEqual(explicitAddPayload.params.types, { g_f32: "f32", g_f64: "f64" });
         const countedAdd = await execFileAsync(process.execPath, [
-            path.resolve(__dirname, "../skills/mcu-live-watch/scripts/read-live.js"),
+            path.resolve(__dirname, "../skills/mcu-variables/scripts/read.js"),
             "--workspace",
             root,
             "--variables",
@@ -336,7 +336,7 @@ const execFileAsync = promisify(execFile);
             "combined --add-to/--count must still defer type resolution to DWARF"
         );
         const csvRead = await execFileAsync(process.execPath, [
-            path.resolve(__dirname, "../skills/mcu-live-watch/scripts/read-live.js"),
+            path.resolve(__dirname, "../skills/mcu-variables/scripts/read.js"),
             "--workspace",
             root,
             "--export-csv",
@@ -356,7 +356,7 @@ const execFileAsync = promisify(execFile);
         assert.strictEqual(csvExportParams.at(-1).to - csvExportParams.at(-1).from, 10000);
         const csvOutput = path.join(root, "exports", "watch.csv");
         const csvWrite = await execFileAsync(process.execPath, [
-            path.resolve(__dirname, "../skills/mcu-live-watch/scripts/read-live.js"),
+            path.resolve(__dirname, "../skills/mcu-variables/scripts/read.js"),
             "--workspace",
             root,
             "--export-csv",
@@ -373,7 +373,7 @@ const execFileAsync = promisify(execFile);
         let emptyCsvDiagnostic;
         try {
             await execFileAsync(process.execPath, [
-                path.resolve(__dirname, "../skills/mcu-live-watch/scripts/read-live.js"),
+                path.resolve(__dirname, "../skills/mcu-variables/scripts/read.js"),
                 "--workspace",
                 root,
                 "--export-csv",
@@ -408,7 +408,7 @@ const execFileAsync = promisify(execFile);
         ]);
         assert.deepStrictEqual(chipReadParams.at(-1), { sections: ["identity"], fields: [] });
         const trendPath = await execFileAsync(process.execPath, [
-            path.resolve(__dirname, "../skills/mcu-live-watch/scripts/read-live.js"),
+            path.resolve(__dirname, "../skills/mcu-variables/scripts/read.js"),
             "--workspace",
             root,
             "--variables",
@@ -428,7 +428,7 @@ const execFileAsync = promisify(execFile);
         let failedTrend;
         try {
             await execFileAsync(process.execPath, [
-                path.resolve(__dirname, "../skills/mcu-live-watch/scripts/read-live.js"),
+                path.resolve(__dirname, "../skills/mcu-variables/scripts/read.js"),
                 "--workspace",
                 root,
                 "--variables",
@@ -459,9 +459,9 @@ const execFileAsync = promisify(execFile);
         assert.strictEqual(forbiddenDiagnostic.error.retryable, false);
         assert.ok(forbiddenDiagnostic.error.suggestedActions.length > 0);
 
-        // —— mcu-var-write：先返回聊天确认，再凭一次性 ID 写入并记住工作区授权 ——
+        // —— mcu-variables 写入：先返回聊天确认，再凭一次性 ID 写入并记住工作区授权 ——
         const writeRequest = await execFileAsync(process.execPath, [
-            path.resolve(__dirname, "../skills/mcu-var-write/scripts/write-var.js"),
+            path.resolve(__dirname, "../skills/mcu-variables/scripts/write.js"),
             "--workspace",
             root,
             "--set",
@@ -471,7 +471,7 @@ const execFileAsync = promisify(execFile);
         assert.strictEqual(confirmation.confirmationRequired, true);
         assert.strictEqual(confirmation.confirmationId, "test-confirmation");
         const writeOk = await execFileAsync(process.execPath, [
-            path.resolve(__dirname, "../skills/mcu-var-write/scripts/write-var.js"),
+            path.resolve(__dirname, "../skills/mcu-variables/scripts/write.js"),
             "--workspace",
             root,
             "--set",
@@ -485,7 +485,7 @@ const execFileAsync = promisify(execFile);
         assert.strictEqual(writePayload.results[0].written, 0.5);
         assert.strictEqual(writePayload.permission.mode, "workspace");
         const reset = await execFileAsync(process.execPath, [
-            path.resolve(__dirname, "../skills/mcu-var-write/scripts/write-var.js"),
+            path.resolve(__dirname, "../skills/mcu-variables/scripts/write.js"),
             "--workspace",
             root,
             "--reset-permission"

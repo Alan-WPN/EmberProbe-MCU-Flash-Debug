@@ -12,7 +12,7 @@ EmberProbe is a VS Code extension for Cortex-M development. Built on OpenOCD, it
 - Live variable watch: non-intrusively reads Cortex-M RAM while the target runs; the sidebar offers a standalone value list, and multiple chart panels can keep independent watch lists and history buffers.
 - Live variable write: changes memory in real time while the target runs, offering slider, input box, and mouse wheel for value changes, with automatic read-back after each change.
 - Cortex-Debug integration: starts breakpoint debugging.
-- Optionally installs ten Agent Skills covering firmware download and verification, live variable reads and writes, SVD peripheral debugging, Cortex-Debug session/breakpoint control, chip and fault inspection, ELF analysis, and configuration synchronization.
+- Optionally installs eight Agent Skills covering firmware programming and verification, live variable reads and writes, SVD peripheral debugging, Cortex-Debug session/breakpoint control, chip and fault inspection, ELF analysis, and configuration synchronization.
 
 ## Requirements
 
@@ -34,14 +34,12 @@ The sidebar lists all global/static variables of the current ELF; click a variab
 
 ## Agent Skills
 
-- `mcu-download`: detects and downloads the newest ELF, reporting an ELF SHA-256 fingerprint during preflight and execution.
-- `mcu-live-watch`: reads once, analyzes trends, or reads/exports actual chart history CSV by panel, series, and time range. 
+- `mcu-flash`: detects and programs the newest ELF or independently verifies on-chip Flash, reporting the ELF SHA-256 during preflight and execution.
+- `mcu-variables`: reads live values, analyzes trends, exports chart history CSV, or safely writes scalar and composite-leaf variables through two-stage confirmation.
 - `mcu-chip-info`: reads chip info by the `identity`, `debug`, and `runtime` groups, or by specific fields.
 - `mcu-config`: reads or changes ELF, debugger, MCU, SVD, OpenOCD, and sampling parameters.
-- `mcu-var-write`: safely writes scalars or composite leaves by name with two-stage confirmation, ELF fingerprint binding, and read-back verification.
 - `mcu-fault-analyzer`: reads and decodes Cortex-M fault registers and symbolizes PC/LR with the current ELF.
 - `mcu-elf-analyze`: analyzes Flash/RAM usage, section layout, and large symbols offline without occupying the debug probe.
-- `mcu-flash-verify`: reads target Flash and compares it with the loadable contents of the current ELF.
 - `mcu-peripheral-debug`: parses the workspace SVD, reads and decodes paused peripheral registers/fields, and performs safe writes after a fresh one-time confirmation for every request.
 - `mcu-debug-control`: starts, stops, and controls Cortex-Debug sessions, including pause/continue/stepping/restart plus source-line and function breakpoints.
 

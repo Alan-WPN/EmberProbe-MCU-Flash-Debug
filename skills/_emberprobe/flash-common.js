@@ -1,5 +1,5 @@
 "use strict";
-// mcu-download / mcu-flash-verify 的共享逻辑：EmberProbe 配置复用、ELF/目标/探针自动
+// mcu-flash 编程/校验入口的共享逻辑：EmberProbe 配置复用、ELF/目标/探针自动
 // 检测与 OpenOCD 进程调用。仅依赖 Node 内置模块，随 skills/_emberprobe 一起分发，
 // 不依赖扩展本体；bridge 不可用时各项检测自动降级为工作区推断。
 

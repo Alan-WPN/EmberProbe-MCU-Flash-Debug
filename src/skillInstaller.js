@@ -29,6 +29,52 @@ async function digest(file) {
         .digest("hex");
 }
 
+async function listFiles(root, current = "") {
+    const result = [];
+    for (const entry of await fs.readdir(path.join(root, current), { withFileTypes: true })) {
+        const relative = path.join(current, entry.name);
+        if (entry.isDirectory()) result.push(...(await listFiles(root, relative)));
+        else if (entry.isFile() && relative !== ".emberprobe-skill.json")
+            result.push(relative.split(path.sep).join("/"));
+        else if (!entry.isFile()) result.push(relative.split(path.sep).join("/"));
+    }
+    return result.sort();
+}
+
+async function isUnmodifiedLegacySkill(targetRoot, entry) {
+    const target = path.join(targetRoot, entry.name);
+    if (!(await exists(target))) return false;
+    let metadata;
+    try {
+        metadata = JSON.parse(await fs.readFile(path.join(target, ".emberprobe-skill.json"), "utf8"));
+    } catch {
+        return false;
+    }
+    if (metadata.name !== entry.name || metadata.version !== entry.version) return false;
+    const expected = Object.keys(entry.files || {}).sort();
+    let actual;
+    try {
+        actual = await listFiles(target);
+    } catch {
+        return false;
+    }
+    if (actual.length !== expected.length || actual.some((file, index) => file !== expected[index])) return false;
+    for (const relative of expected) {
+        if ((await digest(path.join(target, relative))) !== entry.files[relative]) return false;
+    }
+    return true;
+}
+
+async function removeUnmodifiedLegacySkills(manifest, targetRoot) {
+    const removed = [];
+    for (const entry of manifest.legacySkills || []) {
+        if (!(await isUnmodifiedLegacySkill(targetRoot, entry))) continue;
+        await fs.rm(path.join(targetRoot, entry.name), { recursive: true, force: true });
+        removed.push(entry.name);
+    }
+    return removed;
+}
+
 function workspaceSkillsRoot(vscode) {
     const workspace = vscode.workspace.workspaceFolders?.[0];
     return workspace ? path.join(workspace.uri.fsPath, ".agents", "skills") : null;
@@ -110,7 +156,12 @@ async function inspectRoot(manifest, sourceRoot, targetRoot, scope) {
     else if (skills.some((item) => item.state === "partial" || item.state === "notInstalled")) state = "partial";
     else if (skills.some((item) => item.state === "outdated")) state = "outdated";
     else if (skills.some((item) => item.state === "modified")) state = "modified";
-    return { scope, root: targetRoot, state, installed, total: skills.length, skills };
+    const legacy = [];
+    for (const entry of manifest.legacySkills || []) {
+        if (await exists(path.join(targetRoot, entry.name))) legacy.push(entry.name);
+    }
+    if (legacy.length && state === "installed") state = "modified";
+    return { scope, root: targetRoot, state, installed, total: skills.length, skills, legacy };
 }
 
 // 检查两个安装范围;顶层为兼容 webview 的合并视图(每个 skill 取较优状态),scopes 供菜单与提示细分
@@ -135,6 +186,8 @@ async function inspectSkills(vscode, context) {
     else if (skills.some((item) => item.state === "partial" || item.state === "notInstalled")) state = "partial";
     else if (skills.some((item) => item.state === "outdated")) state = "outdated";
     else if (skills.some((item) => item.state === "modified")) state = "modified";
+    const resolvedLegacy = scopes.workspace?.legacy?.length ? scopes.workspace.legacy : scopes.global.legacy;
+    if (resolvedLegacy.length && state === "installed") state = "modified";
     return { state, installed, total: skills.length, skills, scopes };
 }
 
@@ -185,6 +238,7 @@ async function installSkill(vscode, context, lang, scope = "workspace") {
                 force: true
             });
         }
+        await removeUnmodifiedLegacySkills(manifest, targetRoot);
     } finally {
         await fs.rm(stage, { recursive: true, force: true });
     }
@@ -207,8 +261,9 @@ async function uninstallSkill(vscode, context, lang, scope) {
             await fs.rm(target, { recursive: true, force: true });
             removed++;
         }
+        removed += (await removeUnmodifiedLegacySkills(manifest, targetRoot)).length;
         let emberprobeSkillRemains = false;
-        for (const entry of manifest.skills) {
+        for (const entry of [...manifest.skills, ...(manifest.legacySkills || [])]) {
             if (await exists(path.join(targetRoot, entry.name))) {
                 emberprobeSkillRemains = true;
                 break;
@@ -242,4 +297,12 @@ async function uninstallSkill(vscode, context, lang, scope) {
     return status;
 }
 
-module.exports = { installSkill, uninstallSkill, inspectSkills, inspectSkill, readManifest };
+module.exports = {
+    installSkill,
+    uninstallSkill,
+    inspectSkills,
+    inspectSkill,
+    readManifest,
+    isUnmodifiedLegacySkill,
+    removeUnmodifiedLegacySkills
+};
